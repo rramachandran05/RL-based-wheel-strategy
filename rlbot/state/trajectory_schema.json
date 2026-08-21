@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "trajectory_v1",
+  "type": "object",
+  "required": [
+    "schema_version", "reward_version", "run_id", "episode_id", "decision_id",
+    "date", "ticker", "position_state", "q_state", "features",
+    "available_actions", "chosen_action", "action_source", "policy_meta",
+    "contract", "risk_checks", "portfolio_before", "next_epoch_date",
+    "portfolio_after", "reward", "reference_return", "next_q_state",
+    "next_position_state", "terminal", "counterfactuals"
+  ],
+  "properties": {
+    "schema_version": {"const": "trajectory_v1"},
+    "reward_version": {"type": "string"},
+    "run_id": {"type": "string"},
+    "episode_id": {"type": "string"},
+    "decision_id": {"type": "string"},
+    "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "ticker": {"type": "string"},
+    "position_state": {"enum": ["CASH", "SHORT_PUT", "LONG_STOCK", "COVERED_CALL"]},
+    "q_state": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {"type": "integer", "minimum": 0, "maximum": 3}
+    },
+    "features": {
+      "type": "object",
+      "required": ["market_regime", "valuation_state", "vol_compensation", "raw"],
+      "properties": {
+        "market_regime": {"type": "integer", "minimum": 0, "maximum": 3},
+        "valuation_state": {"type": "integer", "minimum": 0, "maximum": 2},
+        "vol_compensation": {"type": "integer", "minimum": 0, "maximum": 2},
+        "raw": {"type": "object"}
+      }
+    },
+    "available_actions": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+    "chosen_action": {"type": "integer", "minimum": 0},
+    "action_source": {"enum": ["policy", "baseline", "sweep"]},
+    "policy_meta": {"type": "object"},
+    "contract": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["type", "strike", "expiration", "dte", "delta",
+                        "premium_fill", "premium_source", "candidates_considered"],
+          "properties": {
+            "type": {"enum": ["PUT", "CALL"]},
+            "strike": {"type": "number", "exclusiveMinimum": 0},
+            "expiration": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+            "dte": {"type": "integer", "minimum": 1},
+            "delta": {"type": "number", "minimum": -1, "maximum": 1},
+            "premium_fill": {"type": "number", "minimum": 0},
+            "premium_source": {"enum": ["synthetic_bs", "historical_chain"]},
+            "candidates_considered": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "risk_checks": {
+      "type": "object",
+      "required": ["passed", "flags"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "flags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "portfolio_before": {"$ref": "#/$defs/portfolio"},
+    "next_epoch_date": {
+      "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}]
+    },
+    "portfolio_after": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/portfolio"}]},
+    "reward": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+    "reference_return": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+    "next_q_state": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer"}}
+      ]
+    },
+    "next_position_state": {
+      "oneOf": [{"type": "null"},
+                 {"enum": ["CASH", "SHORT_PUT", "LONG_STOCK", "COVERED_CALL"]}]
+    },
+    "terminal": {"type": "boolean"},
+    "counterfactuals": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "additionalProperties": {"type": "number"}}
+      ]
+    }
+  },
+  "$defs": {
+    "portfolio": {
+      "type": "object",
+      "required": ["cash", "shares", "cost_basis", "nav"],
+      "properties": {
+        "cash": {"type": "number"},
+        "shares": {"type": "integer", "minimum": 0},
+        "cost_basis": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+        "nav": {"type": "number"}
+      }
+    }
+  }
+}
