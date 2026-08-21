@@ -135,8 +135,8 @@ def sweep_ticker(ticker: str, frame: pd.DataFrame, ps, train_start, train_end,
     cc_nav = run_cc_program(window, ps)
     close = frame["close"]
 
-    regime = window["market_regime"]
-    episode_id = (regime != regime.shift()).cumsum()
+    regime = window["market_regime"].fillna(-1).astype(int)
+    episode_id = (regime != regime.shift()).cumsum().astype(int)
 
     targets = []
     dates = window.index

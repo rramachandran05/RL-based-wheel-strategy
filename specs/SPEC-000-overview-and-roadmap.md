@@ -35,6 +35,10 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 
 ## 4. Roadmap and gates
 
+> **Status 2026-08-21 — MVP 1 and MVP 2 executed.**
+> **G1 PASSED**: PUT-index replication, fitted `iv_uplift=0.10`; validation-half monthly-return corr 0.959, ann-return diff −1.6 pt, vol ratio 1.15.
+> **G2 FAILED (legitimate outcome per SPEC-006 §5)**: pooled test differential vs Baseline 3 = −0.21%/yr (F1 −0.54%, F2 +0.12%); drawdown, regime-segment, and A/B criteria all passed — the learned policy is indistinguishable from the rules, not riskier. Root cause: with valuation inert historically (DATA-GAP-3) only 10 of 36 states are populated, and regime+vol-comp alone don't separate the tiers. **Deliverable stands as the rule-driven assistant (B3 + selector + risk engine).** MVP 3 must be re-scoped before further learning: leading candidates are closing DATA-GAP-3 (historical valuation), richer vol-comp once per-ticker IV exists, and management-policy learning where the rule baseline is weakest.
+
 **MVP 1 — Rule-driven simulator (no learning).** Zero research risk.
 1. Data adapters + feature series (SPEC-002)
 2. Simulator + assignment mechanics + daily MTM (SPEC-003)
