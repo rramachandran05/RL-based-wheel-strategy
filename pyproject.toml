@@ -1,0 +1,13 @@
+[project]
+name = "wheel-strategy-rlbot"
+version = "0.1.0"
+description = "RL wheel-strategy assistant: risk-budget policy + deterministic contract selector"
+requires-python = ">=3.11"
+dependencies = ["numpy", "pandas", "scipy", "requests", "pyarrow"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
