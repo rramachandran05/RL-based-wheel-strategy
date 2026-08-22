@@ -67,6 +67,8 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 - Track B: Alpha Vantage EPS-based valuation proxy to revive the dead valuation axis — **GATE G2-rerun**
 - Deferred indefinitely: HMM, GARCH, adaptive Q-blending, trend/momentum promotion, ICRL prep
 
+> **Ablation 2026-08-22 (trend replaces valuation, SPEC-001 §3.2 gate): FAILED, worst of the three axis variants.** State = regime × trend(3) × vol-comp, momentum-following rule prior, otherwise byte-identical G2 pipeline. Pooled test −0.74%/yr (F1 −0.62%, F2 −0.86%; only 11–23% of episodes positive; sideways segment lagging >2pts in F2) vs −0.04%/yr for the EPS-proxy valuation axis and −0.21%/yr original. Trend deviations from the rule prior look strong in-sample (trend clusters within regimes inflate apparent n_eff) and generalize worst out-of-sample. Conclusion: the trend axis is *worse* than the valuation axis for the learner; the opening-decision question stays closed and trend stays a logged-only feature. Verdict: `reports/ablation_trend_verdict.json`.
+
 **MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist.
 
 ## 5. Non-goals (v1)
