@@ -55,6 +55,13 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 9. Walk-forward evaluation vs. Baseline 3 (SPEC-006)
 10. **GATE G2: learned policy beats Baseline 3 out-of-sample (SPEC-006 §6). No expansion before this.**
 
+> **Status 2026-08-22 — MVP 3 (SPEC-007) executed. Both gates FAILED — honestly and informatively.**
+> **G2-RERUN FAILED**: with the AV EPS proxy the valuation axis populated 30/36 states (AC-4 pass), yet the learned opening policy still matches Baseline 3 to noise (pooled test −0.04%/yr, F1 drawdown ratio 1.49 where it deviated). B3 conditions on valuation too, so the axis helped both arms; opening decisions are now settled twice in favor of the rule table.
+> **G3 FAILED on the no-added-drawdown criterion**: F1's learned management table deviated from HOLD in 0 of 70 states (≡ incumbent); F2 found exactly one credible deviation — SHORT_PUT / BULL_HIGH_VOL / SAFE / EXPIRY_WEEK → ROLL_SAME_RISK (the practitioner "roll early when safe" rule, +1.5bp/cycle, n_eff 71) — worth +0.08%/yr on test but with drawdown ratio 1.094 > 1.00. Both return criteria passed; the strict risk criterion did not.
+> **Bonus finding: M-B2 (the mechanical ±3% MOS roll rule) is actively harmful** — −1.2%/yr (F1) and −2.3%/yr (F2) vs hold-to-expiry. Do not adopt the sibling project's roll rule mechanically.
+> **Structural caveat**: the synthetic-BS track prices every option at fair vol + one global uplift, so management alpha driven by IV dynamics (vol spikes, skew shifts) is invisible by construction. Management learning may be under-powered here; a real-IV data source is the prerequisite for a fair retest (blocked by the Tiingo/AV-only constraint).
+> **Standing deliverable: the rule-driven assistant — B3 openings + hold-to-expiry + selector + risk engine — is now the twice-validated production policy.**
+
 **MVP 3 — RESCOPED 2026-08-22 (see SPEC-007; original scope retired after the G2 post-mortem).**
 - Track A: learned management policies (roll/close/accept) vs. the hold-to-expiry incumbent — **GATE G3** (interface: SPEC-001A)
 - Track B: Alpha Vantage EPS-based valuation proxy to revive the dead valuation axis — **GATE G2-rerun**
