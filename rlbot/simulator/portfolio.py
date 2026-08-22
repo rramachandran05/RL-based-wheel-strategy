@@ -26,6 +26,7 @@ class OpenOption:
     expiration: pd.Timestamp
     contracts: int
     premium_fill: float          # per-share fill actually received
+    tier: int | None = None      # opening risk tier (SPEC-001A roll mechanics)
 
 
 @dataclass(frozen=True)
@@ -55,14 +56,25 @@ def sell_open_fill(mid: float, cfg: ExecutionConfig) -> float:
     return mid * (1.0 - cfg.slippage_pct_of_premium)
 
 
-def open_short_option(port: Portfolio, quote, cfg: ExecutionConfig) -> Portfolio:
+def open_short_option(port: Portfolio, quote, cfg: ExecutionConfig,
+                      tier: int | None = None) -> Portfolio:
     fill = sell_open_fill(quote.mid, cfg)
     proceeds = fill * 100 * cfg.contracts - cfg.commission_per_contract * cfg.contracts
     return replace(
         port,
         cash=port.cash + proceeds,
-        option=OpenOption(quote.cp, quote.strike, quote.expiration, cfg.contracts, fill),
+        option=OpenOption(quote.cp, quote.strike, quote.expiration, cfg.contracts,
+                          fill, tier),
     )
+
+
+def buy_to_close(port: Portfolio, mark: float, cfg: ExecutionConfig) -> Portfolio:
+    """SPEC-001A §3 CLOSE leg: fill = mark × (1 + slippage) + commission."""
+    opt = port.option
+    assert opt is not None
+    cost = mark * (1.0 + cfg.slippage_pct_of_premium) * 100 * opt.contracts \
+        + cfg.commission_per_contract * opt.contracts
+    return replace(port, cash=port.cash - cost, option=None)
 
 
 def settle_expiration(port: Portfolio, close: float) -> Portfolio:

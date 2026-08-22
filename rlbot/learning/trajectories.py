@@ -8,16 +8,31 @@ import jsonschema
 
 from rlbot.state.enums import REWARD_VERSION, SCHEMA_VERSION
 
-SCHEMA_PATH = Path(__file__).parent.parent / "state" / "trajectory_schema.json"
-_SCHEMA = json.loads(SCHEMA_PATH.read_text())
+_STATE_DIR = Path(__file__).parent.parent / "state"
+SCHEMA_PATH = _STATE_DIR / "trajectory_schema.json"
+_SCHEMAS = {
+    "trajectory_v1": json.loads(SCHEMA_PATH.read_text()),
+    "trajectory_v2": json.loads((_STATE_DIR / "trajectory_schema_v2.json").read_text()),
+}
+_SCHEMA = _SCHEMAS["trajectory_v1"]
 
 
 def decision_to_record(d, ticker: str, run_id: str, episode_id: str, seq: int,
                        policy_meta: dict | None = None,
-                       counterfactuals: dict | None = None) -> dict:
+                       counterfactuals: dict | None = None,
+                       schema_version: str = SCHEMA_VERSION) -> dict:
+    """v1 for opening decisions; pass schema_version="trajectory_v2" for runs
+    that include management decisions (SPEC-001A §6)."""
+    mgmt = getattr(d, "mgmt_state", None)
+    if mgmt is not None and schema_version == "trajectory_v1":
+        raise ValueError("management decisions require schema_version=trajectory_v2")
+    extra = {"mgmt_state": list(mgmt) if mgmt is not None else None} \
+        if schema_version == "trajectory_v2" else {}
+    reward_version = "diff_v2" if mgmt is not None else REWARD_VERSION
     return {
-        "schema_version": SCHEMA_VERSION,
-        "reward_version": REWARD_VERSION,
+        **extra,
+        "schema_version": schema_version,
+        "reward_version": reward_version,
         "run_id": run_id,
         "episode_id": episode_id,
         "decision_id": f"{episode_id}:{seq}",
@@ -50,7 +65,11 @@ def decision_to_record(d, ticker: str, run_id: str, episode_id: str, seq: int,
 
 
 def validate_record(record: dict) -> None:
-    jsonschema.validate(record, _SCHEMA)
+    schema = _SCHEMAS.get(record.get("schema_version"))
+    if schema is None:
+        raise jsonschema.ValidationError(
+            f"unsupported schema_version: {record.get('schema_version')!r}")
+    jsonschema.validate(record, schema)
 
 
 def write_jsonl(records: list, path: Path) -> None:

@@ -181,8 +181,10 @@ def g2_verdict(folds: list) -> dict:
             "per_fold_test_diff_ann": tests, "criteria": criteria}
 
 
-def main():
-    cfg = RlbotConfig()
+def main(valuation_proxy: bool = False):
+    """valuation_proxy=True is the SPEC-007 §3.2 G2-RERUN: identical pipeline,
+    valuation axis fed by the AV EPS percentile proxy where sheet FV is absent."""
+    cfg = RlbotConfig(use_valuation_proxy=valuation_proxy)
     gate = require_gate(cfg)                       # GATE G1 enforced (AC-5)
     ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
     store = FrameStore(cfg)
@@ -190,16 +192,19 @@ def main():
     fold_results = [run_fold(f, store, ps, cfg, traj_dir) for f in FOLDS]
     verdict = g2_verdict(fold_results)
     out = {"g1": {"iv_uplift": gate["iv_uplift"], "pass": gate["pass"]},
+           "valuation_proxy": valuation_proxy,
            "g2": verdict, "folds": fold_results,
            "disclaimer": ("Survivorship scope (DATA-GAP-5): universe is the "
                            "'willing to own' screen's survivors; results are "
                            "conditional on that screen.")}
     report_dir = cfg.data.base_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "g2_verdict.json").write_text(json.dumps(out, indent=2))
+    name = "g2_rerun_verdict.json" if valuation_proxy else "g2_verdict.json"
+    (report_dir / name).write_text(json.dumps(out, indent=2))
     print(json.dumps({"g2": verdict}, indent=2))
     return out
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(valuation_proxy="--valuation-proxy" in sys.argv)

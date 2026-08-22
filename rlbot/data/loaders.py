@@ -24,12 +24,20 @@ class FrameStore:
     def __init__(self, cfg: RlbotConfig):
         self.cfg = cfg
         self.tables = load_canonical(cfg)
+        self._proxy = None
+        if cfg.use_valuation_proxy:
+            path = cfg.data.canonical_path / "valuation_proxy.parquet"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"use_valuation_proxy=True but {path} missing; "
+                    "run python -m rlbot.data.eps_proxy")
+            self._proxy = pd.read_parquet(path)
         self._cache: dict = {}
 
     def frame(self, ticker: str) -> pd.DataFrame:
         if ticker not in self._cache:
             self._cache[ticker] = build_ticker_frame(
                 ticker, self.tables["underlying"], self.tables["market"],
-                self.tables["valuation"], self.cfg,
+                self.tables["valuation"], self.cfg, valuation_proxy=self._proxy,
             )
         return self._cache[ticker]

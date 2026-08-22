@@ -29,6 +29,7 @@ def build_ticker_frame(
     market: pd.DataFrame,       # canonical
     valuation: pd.DataFrame,    # canonical (may be empty)
     cfg: RlbotConfig,
+    valuation_proxy: pd.DataFrame | None = None,   # SPEC-007 Track B
 ) -> pd.DataFrame:
     u = underlying[underlying["ticker"] == ticker].drop(columns=["ticker"]).copy()
     rv_col = f"realized_vol_{cfg.data.realized_vol_ticker_window}"
@@ -47,4 +48,13 @@ def build_ticker_frame(
     frame["fv_dist"] = (frame["close"] - frame["fv_buy"]) / frame["fv_buy"]
     frame["valuation_state"] = classify_valuation_series(frame["fv_dist"], cfg.valuation)
     frame.loc[frame["fv_dist"].isna(), "valuation_state"] = pd.NA
+
+    # Track B: sheet-based FV wins where present; EPS-percentile proxy fills
+    # the rest (SPEC-007 §3.1). Absent both -> NA -> FAIR at encode time.
+    if valuation_proxy is not None and not valuation_proxy.empty:
+        prox = valuation_proxy[valuation_proxy["ticker"] == ticker]
+        if not prox.empty:
+            p = prox["valuation_state_proxy"].reindex(frame.index)
+            fill = frame["valuation_state"].isna() & p.notna()
+            frame.loc[fill, "valuation_state"] = p[fill]
     return frame

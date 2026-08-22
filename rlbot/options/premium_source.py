@@ -104,6 +104,17 @@ class SyntheticBSPremiumSource:
                 ))
         return quotes
 
+    def delta_now(
+        self, cp: str, strike: float, expiration: pd.Timestamp,
+        date: pd.Timestamp, spot: float, vol_proxy: float,
+    ) -> float:
+        """Signed BS delta of an open contract on a later date."""
+        dte = max((expiration - date.normalize()).days, 0)
+        if dte == 0:
+            itm = (spot < strike) if cp == "P" else (spot > strike)
+            return (-1.0 if cp == "P" else 1.0) if itm else 0.0
+        return bs_delta(cp, spot, strike, dte / 365.0, self._vol(vol_proxy), self.r)
+
     def reprice(
         self, cp: str, strike: float, expiration: pd.Timestamp,
         date: pd.Timestamp, spot: float, vol_proxy: float,

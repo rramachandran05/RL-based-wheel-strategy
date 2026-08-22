@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "trajectory_v1",
+  "title": "trajectory_v2",
   "type": "object",
   "required": [
     "schema_version",
@@ -27,11 +27,12 @@
     "next_q_state",
     "next_position_state",
     "terminal",
-    "counterfactuals"
+    "counterfactuals",
+    "mgmt_state"
   ],
   "properties": {
     "schema_version": {
-      "const": "trajectory_v1"
+      "const": "trajectory_v2"
     },
     "reward_version": {
       "type": "string"
@@ -283,6 +284,23 @@
           "type": "object",
           "additionalProperties": {
             "type": "number"
+          }
+        }
+      ]
+    },
+    "mgmt_state": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
           }
         }
       ]

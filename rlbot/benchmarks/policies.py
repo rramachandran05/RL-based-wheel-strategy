@@ -82,3 +82,32 @@ class AdaptiveRulePolicy:
     def decide(self, position_state, q_state, row):
         a = RULE_TABLE[(position_state.value, q_state)]
         return CashAction(a) if position_state == PositionState.CASH else StockAction(a)
+
+
+# ---------------- management baselines (SPEC-007 §2.3) ----------------
+from rlbot.state.enums import CallMgmtAction, PutMgmtAction  # noqa: E402
+
+
+class HoldMgmtPolicy:
+    """M-B1: hold to expiration always — the MVP-2 incumbent GATE G3 must beat."""
+
+    def decide_mgmt(self, position_state, m_state, ctx, row):
+        return PutMgmtAction.HOLD if position_state == PositionState.SHORT_PUT \
+            else CallMgmtAction.HOLD
+
+
+class MosRollMgmtPolicy:
+    """M-B2: the sibling project's mechanical margin-of-safety roll rule
+    (position_monitor.should_roll): mos = (strike − price)/price;
+    CSP rolls when mos >= −threshold, CC rolls when mos <= threshold."""
+
+    def __init__(self, threshold: float = 0.03):
+        self.threshold = threshold
+
+    def decide_mgmt(self, position_state, m_state, ctx, row):
+        mos = (ctx["strike"] - ctx["spot"]) / ctx["spot"]
+        if position_state == PositionState.SHORT_PUT:
+            return PutMgmtAction.ROLL_LOWER_RISK if mos >= -self.threshold \
+                else PutMgmtAction.HOLD
+        return CallMgmtAction.ROLL_UP_AND_OUT if mos <= self.threshold \
+            else CallMgmtAction.HOLD

@@ -1,0 +1,52 @@
+{
+ "b1": {
+  "nav_sha": "5aab88fcf21f5399040bfdadd9106dbbb78f3157abddeba77cb5021f543ab1db",
+  "final_nav": 101410.917085,
+  "n_decisions": 17,
+  "n_cycles": 16,
+  "actions": [
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3
+  ]
+ },
+ "b3": {
+  "nav_sha": "5aab88fcf21f5399040bfdadd9106dbbb78f3157abddeba77cb5021f543ab1db",
+  "final_nav": 101410.917085,
+  "n_decisions": 17,
+  "n_cycles": 16,
+  "actions": [
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3,
+   3
+  ]
+ }
+}

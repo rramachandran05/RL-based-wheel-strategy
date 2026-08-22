@@ -77,6 +77,9 @@ def _default_base_path() -> Path:
 class RlbotConfig:
     tickers: list = field(default_factory=lambda: list(DEFAULT_TRAINING_TICKERS))
     market_ticker: str = MARKET_TICKER
+    # SPEC-007 Track B: fill the historically-dead valuation axis from the
+    # AV EPS percentile proxy where no sheet-based FV snapshot exists
+    use_valuation_proxy: bool = False
     data: DataConfig = field(default_factory=DataConfig)
     regime: RegimeThresholds = field(default_factory=RegimeThresholds)
     vol_comp: VolCompThresholds = field(default_factory=VolCompThresholds)
