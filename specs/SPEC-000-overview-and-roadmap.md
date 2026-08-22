@@ -30,6 +30,8 @@ This project uses its **own venv (Python ≥ 3.11)**. Vendored 3.8-era modules a
 | SPEC-004 | Contract selector and risk engine | options/risk | no |
 | SPEC-005 | Learning: counterfactual sweep, estimators, pessimism, promotion | learning | no |
 | SPEC-006 | Baselines, walk-forward evaluation, metrics, gates | evaluation | no |
+| SPEC-001A | Management-state addendum (SPEC-001 v2: MgmtStateV1, roll mechanics, trajectory_v2) | interface | **yes — extends frozen SPEC-001 by version bump** |
+| SPEC-007 | MVP-3 rescope: management-policy learning (G3) + AV valuation proxy (G2-rerun) | learning | no |
 
 SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy, and assistant layers all program against it, so the learning method can be swapped (Q-table → bandit → ICRL) without touching the simulator, and every trajectory logged from day one stays usable.
 
@@ -53,9 +55,12 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 9. Walk-forward evaluation vs. Baseline 3 (SPEC-006)
 10. **GATE G2: learned policy beats Baseline 3 out-of-sample (SPEC-006 §6). No expansion before this.**
 
-**MVP 3 — Regime-aware adaptive policy.** Position-management Q-tables (roll/close/assign), ablation-gated state additions (trend, momentum), optional HMM/GARCH, adaptive Q blending.
+**MVP 3 — RESCOPED 2026-08-22 (see SPEC-007; original scope retired after the G2 post-mortem).**
+- Track A: learned management policies (roll/close/accept) vs. the hold-to-expiry incumbent — **GATE G3** (interface: SPEC-001A)
+- Track B: Alpha Vantage EPS-based valuation proxy to revive the dead valuation axis — **GATE G2-rerun**
+- Deferred indefinitely: HMM, GARCH, adaptive Q-blending, trend/momentum promotion, ICRL prep
 
-**MVP 4 — ICRL.** Sequence model over recent + comparable historical trajectories; only after the trajectory DB is mature.
+**MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist.
 
 ## 5. Non-goals (v1)
 
