@@ -84,6 +84,38 @@ class AdaptiveRulePolicy:
         return CashAction(a) if position_state == PositionState.CASH else StockAction(a)
 
 
+# ---------------- leveraged-ETF rules (SPEC-008 §4) ----------------
+def leveraged_cash_action(q_state) -> CashAction:
+    """Capped rule table for 3x leveraged ETFs (TQQQ/SPXL): never above
+    BALANCED, and WAIT in BEAR_STRESS unconditionally — no attractive-vol-comp
+    exception, because assignment means 3x exposure into a stress regime and
+    the realized-vol proxy lags exactly when it matters most."""
+    regime = MarketRegime(q_state[0])
+    if regime == MarketRegime.BEAR_STRESS:
+        return CashAction.WAIT
+    if regime == MarketRegime.BULL_LOW_VOL:
+        return CashAction.PUT_BALANCED
+    return CashAction.PUT_CONSERVATIVE          # BULL_HIGH_VOL / SIDEWAYS
+
+
+def leveraged_stock_action(q_state) -> StockAction:
+    """Covered calls on assigned leveraged shares bias toward reducing
+    exposure: closer strikes outside calm bull regimes."""
+    regime = MarketRegime(q_state[0])
+    if regime == MarketRegime.BULL_LOW_VOL:
+        return StockAction.CALL_BALANCED
+    return StockAction.CALL_AGGRESSIVE
+
+
+class LeveragedETFPolicy:
+    """Assistant-only policy for leveraged ETFs; same interface as B3."""
+
+    def decide(self, position_state, q_state, row):
+        if position_state == PositionState.CASH:
+            return leveraged_cash_action(q_state)
+        return leveraged_stock_action(q_state)
+
+
 # ---------------- management baselines (SPEC-007 §2.3) ----------------
 from rlbot.state.enums import CallMgmtAction, PutMgmtAction  # noqa: E402
 

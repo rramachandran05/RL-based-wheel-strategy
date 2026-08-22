@@ -116,14 +116,22 @@ def build_valuation(snapshot_dir: Path, cfg: RlbotConfig) -> pd.DataFrame:
 def build_all(cfg: RlbotConfig, download: bool = False) -> dict:
     """Materialize every canonical table to parquet (REQ-2.5). Returns paths."""
     data = cfg.data
+    universe = cfg.assistant_universe
     if download:
         sources.download_bars([cfg.market_ticker], data.bars_path, years=data.spy_years)
-        sources.download_bars(cfg.tickers, data.bars_path, years=data.ticker_years)
+        sources.download_bars(universe, data.bars_path, years=data.ticker_years)
         sources.fetch_vix_fred(data.external_path / "vixcls.csv")
 
     spy_df = sources.load_bars(cfg.market_ticker, data.bars_path)
     vix = sources.load_vix(data.external_path)
-    bars = {t: sources.load_bars(t, data.bars_path) for t in cfg.tickers}
+    bars = {}
+    for t in universe:
+        try:
+            bars[t] = sources.load_bars(t, data.bars_path)
+        except sources.DataUnavailable:
+            if t in cfg.tickers:
+                raise                    # training tickers are mandatory
+            print(f"  {t}: no cached bars, skipping (assistant-only ETF)")
 
     market = build_market(spy_df, vix, cfg)
     underlying = build_underlying(bars, cfg)

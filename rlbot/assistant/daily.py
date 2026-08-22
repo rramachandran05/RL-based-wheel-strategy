@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from rlbot.benchmarks.policies import AdaptiveRulePolicy
+from rlbot.benchmarks.policies import AdaptiveRulePolicy, LeveragedETFPolicy
 from rlbot.config import RlbotConfig
 from rlbot.data.loaders import FrameStore
 from rlbot.evaluation.put_gate import require_gate
@@ -41,20 +41,27 @@ MODEL_NOTE = ("Premiums/deltas are synthetic-BS model values (G1-calibrated at "
               "index level). Compare with live broker quotes before acting; if "
               "live premium is materially below model, the compensation case "
               "may not hold. Recommendations only - not investment advice.")
+LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
+                  "WAIT in any stress regime). Assignment means 3x market "
+                  "exposure; model premiums are least reliable on these names "
+                  "(vol clustering) — consider reduced contract size.")
 
 
-def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float) -> dict:
+def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
+                      policy=None, leveraged: bool = False) -> dict:
+    policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
     q = encode_q_state(row["market_regime"], row["valuation_state"], row["vol_compensation"])
-    out = {"ticker": ticker, "date": str(date.date()), "spot": float(row["close"])}
+    out = {"ticker": ticker, "date": str(date.date()), "spot": float(row["close"]),
+           "leveraged": leveraged}
     if q is None or pd.isna(row["vol_proxy"]) or row["vol_proxy"] <= 0:
         out["action"] = "SKIP"
         out["reason"] = "state undefined (indicator warmup or missing data)"
         return out
     out["q_state"] = list(q)
     out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
-    action = AdaptiveRulePolicy().decide(PositionState.CASH, q, row)
+    action = policy.decide(PositionState.CASH, q, row)
     out["policy_action"] = action.name
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
@@ -174,9 +181,12 @@ def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
         c = r.get("contract") or {}
-        lines.append(f"| {r['ticker']} | {state} | {r['action']} "
+        name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
+        lines.append(f"| {name} | {state} | {r['action']} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
                      f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} |")
+    if any(r.get("leveraged") for r in recs):
+        lines += ["", f"_{LEVERAGED_NOTE}_"]
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
     if guides:
         lines += ["| Ticker | Type | Strike | DTE | Δ now | Prem captured | Guidance | Flags |",
@@ -208,10 +218,20 @@ def main(argv=None):
     warnings = []
     recs, guides = [], []
     latest = None
-    for t in cfg.tickers:
-        frame = store.frame(t)
+    for t in cfg.assistant_universe:
+        try:
+            frame = store.frame(t)
+        except Exception:
+            warnings.append(f"{t}: no data in canonical tables; run --download")
+            continue
+        if frame.empty:
+            warnings.append(f"{t}: no data in canonical tables; run --download")
+            continue
         latest = max(latest or frame.index[-1], frame.index[-1])
-        recs.append(recommend_opening(t, frame, ps, args.cash))
+        lev = cfg.is_leveraged(t)
+        policy = LeveragedETFPolicy() if lev else AdaptiveRulePolicy()
+        recs.append(recommend_opening(t, frame, ps, args.cash,
+                                      policy=policy, leveraged=lev))
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
@@ -222,7 +242,7 @@ def main(argv=None):
         warnings.append(pos_warn)
     for p in positions:
         tkr = str(p["ticker"]).upper()
-        if tkr in cfg.tickers:
+        if tkr in cfg.assistant_universe:
             guides.append(guide_position(p, store.frame(tkr), ps))
         else:
             warnings.append(f"position ticker {tkr} not in universe; skipped")
@@ -232,7 +252,7 @@ def main(argv=None):
     live.mkdir(parents=True, exist_ok=True)
     payload = {"date": date, "iv_uplift": gate["iv_uplift"],
                "openings": recs, "positions": guides, "warnings": warnings,
-               "notes": [MODEL_NOTE, MGMT_NOTE]}
+               "notes": [MODEL_NOTE, MGMT_NOTE, LEVERAGED_NOTE]}
     (live / f"recommendations_{date}.json").write_text(json.dumps(payload, indent=2))
     brief = render_brief(date, recs, guides, warnings)
     (live / f"brief_{date}.md").write_text(brief)
