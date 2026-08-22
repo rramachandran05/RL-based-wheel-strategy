@@ -26,9 +26,13 @@ class Quote:
     strike: float
     expiration: pd.Timestamp
     dte: int                     # calendar days
-    mid: float                   # per-share model price
-    delta: float                 # signed BS delta (puts negative)
+    mid: float                   # per-share price (model or market)
+    delta: float                 # signed delta (puts negative)
     vol_used: float
+    # real-chain liquidity fields; None on the synthetic track (SPEC-004 §1.1)
+    volume: float | None = None
+    oi: float | None = None
+    spread_pct: float | None = None
 
 
 def bs_delta(cp: str, spot: float, strike: float, t_years: float, vol: float, r: float = 0.0) -> float:
@@ -59,6 +63,8 @@ def expiration_fridays(date: pd.Timestamp, dte_min: int, dte_max: int) -> list:
 
 class SyntheticBSPremiumSource:
     """Synthetic chain + repricing from BS on a realized-vol proxy."""
+
+    source_name = "synthetic_bs"
 
     def __init__(self, iv_uplift: float = 0.0, r: float = 0.0):
         self.iv_uplift = iv_uplift

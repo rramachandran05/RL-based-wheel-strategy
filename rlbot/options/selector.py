@@ -34,6 +34,13 @@ class SelectorConfig:
     })
     band_widen: float = 0.02      # single widening step (SPEC-004 §1.3)
     payout_grid: int = 2000       # expected_put_payout resolution
+    # Liquidity floors — applied only to quotes carrying real chain fields
+    # (SPEC-004 §1.1). min_volume defaults 0 (off): OTM monthlies often print
+    # zero volume on quiet days while carrying healthy OI; deviation from the
+    # spec's volume>=10 pending calibration on real chains.
+    min_volume: float = 0.0
+    min_oi: float = 100.0
+    max_spread_pct: float = 0.10
 
 
 def _band_for(action) -> tuple:
@@ -42,9 +49,20 @@ def _band_for(action) -> tuple:
     return CALL_DELTA_BANDS[action]
 
 
-def _filter(quotes, band, dte_min, dte_max):
+def _liquid(q, cfg: SelectorConfig) -> bool:
+    if q.oi is None:                      # synthetic track: no liquidity data
+        return True
+    return ((q.volume or 0) >= cfg.min_volume
+            and (q.oi or 0) >= cfg.min_oi
+            and (q.spread_pct if q.spread_pct is not None else 1.0) <= cfg.max_spread_pct)
+
+
+def _filter(quotes, band, dte_min, dte_max, cfg: SelectorConfig = None):
     lo, hi = band
-    return [q for q in quotes if lo <= abs(q.delta) <= hi and dte_min <= q.dte <= dte_max]
+    out = [q for q in quotes if lo <= abs(q.delta) <= hi and dte_min <= q.dte <= dte_max]
+    if cfg is not None:
+        out = [q for q in out if _liquid(q, cfg)]
+    return out
 
 
 def score_quote(q, spot: float, vol_proxy: float, valuation_state, cost_basis, cfg: SelectorConfig) -> float:
@@ -83,10 +101,10 @@ def select_contract(
 
     dte_min, dte_max, dte_pref = TARGET_DTE
     band = _band_for(action)
-    candidates = _filter(quotes, band, dte_min, dte_max)
+    candidates = _filter(quotes, band, dte_min, dte_max, cfg)
     if not candidates:  # single widen step, then give up (SPEC-004 §1.3)
         widened = (max(band[0] - cfg.band_widen, 0.01), band[1] + cfg.band_widen)
-        candidates = _filter(quotes, widened, dte_min, dte_max)
+        candidates = _filter(quotes, widened, dte_min, dte_max, cfg)
     if cost_basis is not None:
         candidates = [q for q in candidates if q.cp != "C" or q.strike >= cost_basis]
     if not candidates:

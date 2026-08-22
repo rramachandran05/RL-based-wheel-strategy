@@ -287,7 +287,7 @@ class WheelEnv:
                     "expiration": str(quote.expiration.date()),
                     "dte": quote.dte, "delta": quote.delta,
                     "premium_fill": port.option.premium_fill,
-                    "premium_source": "synthetic_bs",
+                    "premium_source": getattr(self.ps, "source_name", "synthetic_bs"),
                     "candidates_considered": n_cands,
                 }
                 action = attempt   # record the tier actually executed
@@ -362,7 +362,7 @@ class WheelEnv:
                         "expiration": str(quote.expiration.date()),
                         "dte": quote.dte, "delta": quote.delta,
                         "premium_fill": port.option.premium_fill,
-                        "premium_source": "synthetic_bs",
+                        "premium_source": getattr(self.ps, "source_name", "synthetic_bs"),
                         "candidates_considered": n_cands,
                     }
                 # rejected roll leg degrades to CLOSE (SPEC-001A §3)

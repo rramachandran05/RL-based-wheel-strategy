@@ -69,7 +69,7 @@ Default universe (from sibling config): stocks AAPL, AMZN, BRK-B, GOOGL, TSM, MA
 
 | ID | Gap | MVP resolution | Real resolution |
 |---|---|---|---|
-| DATA-GAP-1 | No historical option chains/IV | Synthetic-BS track + PUT-index calibration gate | **DECIDED 2026-08-21: no chain-data purchase — available sources are Tiingo and Alpha Vantage only. Synthetic-BS is the permanent v1 track; `HistoricalChainPremiumSource` stays specced-but-unbuilt.** |
+| DATA-GAP-1 | No historical option chains/IV | Synthetic-BS track + PUT-index calibration gate | **CLOSED 2026-08-22: Alpha Vantage Premium purchased. `HISTORICAL_OPTIONS` (chains + IV + greeks, coverage to 2008) backfilling 2012→present for the 10 training tickers + TQQQ via `rlbot/data/options_ingest.py` (parallel, rate-adaptive, resumable per ticker-year) into `data_local/chains/`. `HistoricalChainPremiumSource` built; selector liquidity floors active on real quotes. Unblocks: real-premium B3 absolutes, per-ticker G1 recalibration, G3 retest with real IV dynamics.** |
 | DATA-GAP-2 | No historical earnings dates | event_risk=false historically; blackout live-only | Historical earnings source (e.g. FMP/AV historical endpoints) |
 | DATA-GAP-3 | No historical valuation series | valuation_state=FAIR historically (inert axis) | FMP historical price-target consensus or manual Morningstar backfill |
 | DATA-GAP-4 | No historical Fear & Greed | Not used; regime is computed from SPY+VIX (reproducible) | n/a — proxy is permanent by design |
