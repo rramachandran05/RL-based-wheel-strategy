@@ -94,6 +94,7 @@ class WheelEnv:
         risk_cfg: RiskConfig | None = None,
         selector_cfg: SelectorConfig = SelectorConfig(),
         epoch_cadence: int = 5,
+        dynamic_sizing: bool = False,
     ):
         self.ticker = ticker
         self.frame = frame
@@ -102,6 +103,10 @@ class WheelEnv:
         self.risk_cfg = risk_cfg or RiskConfig.single_ticker()
         self.selector_cfg = selector_cfg
         self.cadence = epoch_cadence
+        # dynamic_sizing: contracts = all the cash (puts) / shares (calls)
+        # will secure, instead of the fixed exec_cfg.contracts. Off by default
+        # — every G-series verdict ran fixed 1-contract sleeves.
+        self.dynamic_sizing = dynamic_sizing
 
     # ------------------------------------------------------------------
     def run(
@@ -247,14 +252,23 @@ class WheelEnv:
             cp = "P" if isinstance(action, CashAction) else "C"
             chain = self.ps.chain(date, spot, vol, cp)
             attempt = action
+            exec_cfg = self.exec_cfg
             for _ in range(2):  # original tier, then one step-down (SPEC-004 §2.2)
                 quote, n_cands = select_contract(
                     attempt, chain, spot, vol, row["valuation_state"]
                     if pd.notna(row["valuation_state"]) else 1,
                     cost_basis=port.cost_basis, cfg=self.selector_cfg,
                 )
+                if quote is not None and self.dynamic_sizing:
+                    n = int(port.cash // (quote.strike * 100)) if cp == "P" \
+                        else port.shares // 100
+                    if n < 1:
+                        quote = None
+                    else:
+                        from dataclasses import replace as _replace
+                        exec_cfg = _replace(self.exec_cfg, contracts=n)
                 risk = validate_open(
-                    quote, self.exec_cfg.contracts, port.cash, port.shares,
+                    quote, exec_cfg.contracts, port.cash, port.shares,
                     current_nav, open_put_escrow=0.0, event_in_window=False,
                     cfg=self.risk_cfg,
                 )
@@ -266,7 +280,7 @@ class WheelEnv:
                     break
                 attempt = nxt
             if quote is not None and risk.passed:
-                port = open_short_option(port, quote, self.exec_cfg, tier=int(attempt))
+                port = open_short_option(port, quote, exec_cfg, tier=int(attempt))
                 contract_dict = {
                     "type": "PUT" if quote.cp == "P" else "CALL",
                     "strike": quote.strike,
