@@ -1,0 +1,254 @@
+"""Daily assistant (SPEC-008): opening recommendations + position guidance
+from the twice-validated rule policy, with live trajectory logging.
+
+Run:  python -m rlbot.assistant.daily [--download] [--cash 100000]
+                                       [--positions data_local/positions.csv]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from rlbot.benchmarks.policies import AdaptiveRulePolicy
+from rlbot.config import RlbotConfig
+from rlbot.data.loaders import FrameStore
+from rlbot.evaluation.put_gate import require_gate
+from rlbot.learning.trajectories import validate_record
+from rlbot.options.premium_source import SyntheticBSPremiumSource
+from rlbot.options.selector import SelectorConfig, select_contract
+from rlbot.risk.engine import RiskConfig, validate_open
+from rlbot.simulator.portfolio import ExecutionConfig
+from rlbot.state.encoder import encode_q_state
+from rlbot.state.enums import CashAction, PositionState, legal_actions
+from rlbot.state.mgmt import (
+    CHALLENGE_DELTA,
+    encode_mgmt_state,
+    moneyness_bucket,
+    premium_captured,
+)
+
+STALE_TRADING_DAYS = 3
+REGIME_NAMES = {0: "BULL_LOW_VOL", 1: "BULL_HIGH_VOL", 2: "SIDEWAYS", 3: "BEAR_STRESS"}
+VAL_NAMES = {0: "ATTRACTIVE", 1: "FAIR", 2: "EXPENSIVE"}
+VC_NAMES = {0: "POOR", 1: "NORMAL", 2: "ATTRACTIVE"}
+MGMT_NOTE = ("Validated guidance is HOLD to expiration. G3 evidence: mechanical "
+             "MOS-based rolling cost 1.2-2.3%/yr vs holding. Flags below are "
+             "attention signals, not roll instructions.")
+MODEL_NOTE = ("Premiums/deltas are synthetic-BS model values (G1-calibrated at "
+              "index level). Compare with live broker quotes before acting; if "
+              "live premium is materially below model, the compensation case "
+              "may not hold. Recommendations only - not investment advice.")
+
+
+def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float) -> dict:
+    row = frame.iloc[-1]
+    date = frame.index[-1]
+    q = encode_q_state(row["market_regime"], row["valuation_state"], row["vol_compensation"])
+    out = {"ticker": ticker, "date": str(date.date()), "spot": float(row["close"])}
+    if q is None or pd.isna(row["vol_proxy"]) or row["vol_proxy"] <= 0:
+        out["action"] = "SKIP"
+        out["reason"] = "state undefined (indicator warmup or missing data)"
+        return out
+    out["q_state"] = list(q)
+    out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
+    action = AdaptiveRulePolicy().decide(PositionState.CASH, q, row)
+    out["policy_action"] = action.name
+    if action == CashAction.WAIT:
+        out["action"] = "WAIT"
+        out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
+        return out
+    vol = float(row["vol_proxy"])
+    chain = ps.chain(date, out["spot"], vol, "P")
+    quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
+                                     cfg=SelectorConfig())
+    risk = validate_open(quote, 1, cash, 0, cash, 0.0, False, RiskConfig.single_ticker())
+    if quote is None:
+        out["action"] = "WAIT"
+        out["reason"] = "tier unimplementable in current chain window"
+        return out
+    if not risk.passed:
+        out["action"] = "WAIT"
+        out["reason"] = f"risk engine: {risk.flags}"
+        return out
+    out["action"] = "SELL_PUT"
+    out["contract"] = {
+        "type": "PUT", "strike": quote.strike,
+        "expiration": str(quote.expiration.date()), "dte": quote.dte,
+        "delta": round(quote.delta, 4), "model_premium": round(quote.mid, 2),
+        "premium_source": "synthetic_bs", "candidates_considered": n_cands,
+    }
+    return out
+
+
+def guide_position(pos: dict, frame: pd.DataFrame, ps) -> dict:
+    row = frame.iloc[-1]
+    date = frame.index[-1]
+    spot = float(row["close"])
+    vol = float(row["vol_proxy"]) if pd.notna(row["vol_proxy"]) else 0.25
+    cp = "P" if pos["type"].upper() == "CSP" else "C"
+    exp = pd.Timestamp(pos["expiration"])
+    dte = max((exp - date.normalize()).days, 0)
+    mark = ps.reprice(cp, pos["strike"], exp, date, spot, vol)
+    delta = ps.delta_now(cp, pos["strike"], exp, date, spot, vol)
+    m_state = encode_mgmt_state(row["market_regime"], cp, spot, pos["strike"], dte)
+    flags = []
+    if moneyness_bucket(cp, spot, pos["strike"]) == 0:
+        flags.append("BREACHED (in the money)")
+    if abs(delta) >= CHALLENGE_DELTA:
+        flags.append(f"delta {abs(delta):.2f} >= 0.40 (challenged)")
+    if dte <= 7:
+        flags.append("expiry week")
+    pc = premium_captured(mark, float(pos.get("premium_fill", 0) or 0))
+    return {
+        "ticker": pos["ticker"], "type": pos["type"].upper(),
+        "strike": pos["strike"], "expiration": str(exp.date()), "dte": dte,
+        "spot": spot, "model_mark": round(mark, 2),
+        "model_delta": round(delta, 4),
+        "premium_captured": round(pc, 3),
+        "mgmt_state": list(m_state) if m_state is not None else None,
+        "guidance": "HOLD", "attention_flags": flags,
+    }
+
+
+def load_positions(path: Path) -> tuple:
+    if not path.exists():
+        return [], f"positions file not found ({path}); openings-only brief"
+    try:
+        df = pd.read_csv(path, comment="#")
+        need = {"ticker", "type", "strike", "expiration", "premium_fill"}
+        if not need.issubset(df.columns):
+            return [], f"positions file missing columns {need - set(df.columns)}"
+        return df.to_dict("records"), None
+    except Exception as e:                                   # REQ-8.3
+        return [], f"positions file unreadable: {e}"
+
+
+def decision_record(rec: dict, cash: float, run_id: str, seq: int) -> dict | None:
+    if "q_state" not in rec:
+        return None
+    contract = None
+    if rec.get("contract"):
+        c = rec["contract"]
+        contract = {"type": c["type"], "strike": c["strike"],
+                    "expiration": c["expiration"], "dte": c["dte"],
+                    "delta": c["delta"], "premium_fill": c["model_premium"],
+                    "premium_source": "synthetic_bs",
+                    "candidates_considered": c["candidates_considered"]}
+    action = {"WAIT": 0, "SELL_PUT": None}.get(rec["action"], 0)
+    if action is None:
+        action = int(CashAction[rec["policy_action"]])
+    return {
+        "schema_version": "trajectory_v2", "reward_version": "diff_v1",
+        "run_id": run_id, "episode_id": f"live-{rec['ticker']}",
+        "decision_id": f"live-{rec['ticker']}:{rec['date']}",
+        "date": rec["date"], "ticker": rec["ticker"], "position_state": "CASH",
+        "q_state": rec["q_state"],
+        "features": {"market_regime": rec["q_state"][0],
+                      "valuation_state": rec["q_state"][1],
+                      "vol_compensation": rec["q_state"][2],
+                      "raw": {"spot": rec["spot"]}},
+        "available_actions": [int(a) for a in legal_actions(PositionState.CASH)],
+        "chosen_action": action, "action_source": "policy",
+        "policy_meta": {"policy": "B3-rules", "validated": "G2/G2-rerun/G3"},
+        "contract": contract,
+        "risk_checks": {"passed": True, "flags": []},
+        "portfolio_before": {"cash": cash, "shares": 0, "cost_basis": None, "nav": cash},
+        "next_epoch_date": None, "portfolio_after": None, "reward": None,
+        "reference_return": None, "next_q_state": None,
+        "next_position_state": None, "terminal": False, "counterfactuals": None,
+        "mgmt_state": None,
+    }
+
+
+def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
+    lines = [f"# Wheel Daily Brief — {date}", "",
+             f"_{MODEL_NOTE}_", ""]
+    for w in warnings:
+        lines.append(f"> ⚠️ {w}")
+    lines += ["", "## Opening recommendations (cash sleeve)", "",
+              "| Ticker | State | Action | Strike | DTE | Δ | Model prem |",
+              "|---|---|---|---|---|---|---|"]
+    for r in recs:
+        state = "/".join(r.get("state_names", ["—"]))
+        c = r.get("contract") or {}
+        lines.append(f"| {r['ticker']} | {state} | {r['action']} "
+                     f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
+                     f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} |")
+    lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
+    if guides:
+        lines += ["| Ticker | Type | Strike | DTE | Δ now | Prem captured | Guidance | Flags |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for g in guides:
+            lines.append(f"| {g['ticker']} | {g['type']} | {g['strike']} | {g['dte']} "
+                         f"| {g['model_delta']} | {g['premium_captured']:.0%} "
+                         f"| **{g['guidance']}** | {'; '.join(g['attention_flags']) or '—'} |")
+    else:
+        lines.append("_No open positions on file._")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--download", action="store_true")
+    parser.add_argument("--cash", type=float, default=100_000.0)
+    parser.add_argument("--positions", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    cfg = RlbotConfig(use_valuation_proxy=True)
+    if args.download:
+        from rlbot.data.build import build_all
+        build_all(RlbotConfig(), download=True)
+    gate = require_gate(cfg)
+    ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
+    store = FrameStore(cfg)
+
+    warnings = []
+    recs, guides = [], []
+    latest = None
+    for t in cfg.tickers:
+        frame = store.frame(t)
+        latest = max(latest or frame.index[-1], frame.index[-1])
+        recs.append(recommend_opening(t, frame, ps, args.cash))
+    if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
+        warnings.append(f"latest bar is {latest.date()} — data is stale; "
+                        "re-run with --download")             # REQ-8.4
+
+    pos_path = args.positions or cfg.data.base_path / "positions.csv"
+    positions, pos_warn = load_positions(pos_path)
+    if pos_warn:
+        warnings.append(pos_warn)
+    for p in positions:
+        tkr = str(p["ticker"]).upper()
+        if tkr in cfg.tickers:
+            guides.append(guide_position(p, store.frame(tkr), ps))
+        else:
+            warnings.append(f"position ticker {tkr} not in universe; skipped")
+
+    date = str(latest.date())
+    live = cfg.data.base_path / "live"
+    live.mkdir(parents=True, exist_ok=True)
+    payload = {"date": date, "iv_uplift": gate["iv_uplift"],
+               "openings": recs, "positions": guides, "warnings": warnings,
+               "notes": [MODEL_NOTE, MGMT_NOTE]}
+    (live / f"recommendations_{date}.json").write_text(json.dumps(payload, indent=2))
+    brief = render_brief(date, recs, guides, warnings)
+    (live / f"brief_{date}.md").write_text(brief)
+
+    run_id = f"live-{date}"
+    with open(live / "decisions.jsonl", "a") as f:
+        for i, r in enumerate(recs):
+            record = decision_record(r, args.cash, run_id, i)
+            if record is not None:
+                validate_record(record)                       # REQ-8.2
+                f.write(json.dumps(record) + "\n")
+
+    print(brief)
+    print(f"wrote {live}/brief_{date}.md, recommendations_{date}.json, decisions.jsonl")
+    return payload
+
+
+if __name__ == "__main__":
+    main()
