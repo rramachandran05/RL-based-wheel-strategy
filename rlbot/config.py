@@ -19,6 +19,9 @@ DEFAULT_TRAINING_TICKERS = [
 # suitability gate, excluded from training and the EPS valuation proxy.
 DEFAULT_ETFS = ["TQQQ", "SPXL", "CHPS", "SPYI"]
 LEVERAGED_ETFS = {"TQQQ", "SPXL"}   # get the capped leveraged rule table
+# Assistant-only extras: names held on the monitor sheet but outside the
+# training universe (position guidance + openings, standard B3 rules).
+DEFAULT_WATCH_EXTRA = ["NOW", "MCHI"]
 MARKET_TICKER = "SPY"
 
 
@@ -81,6 +84,7 @@ def _default_base_path() -> Path:
 class RlbotConfig:
     tickers: list = field(default_factory=lambda: list(DEFAULT_TRAINING_TICKERS))
     etfs: list = field(default_factory=lambda: list(DEFAULT_ETFS))
+    watch_extra: list = field(default_factory=lambda: list(DEFAULT_WATCH_EXTRA))
     market_ticker: str = MARKET_TICKER
     # SPEC-007 Track B: fill the historically-dead valuation axis from the
     # AV EPS percentile proxy where no sheet-based FV snapshot exists
@@ -88,8 +92,13 @@ class RlbotConfig:
 
     @property
     def assistant_universe(self) -> list:
-        """Everything the daily assistant covers: training stocks + live ETFs."""
-        return self.tickers + [e for e in self.etfs if e not in self.tickers]
+        """Everything the daily assistant covers: training stocks + live ETFs
+        + monitor-sheet extras."""
+        out = list(self.tickers)
+        for t in self.etfs + self.watch_extra:
+            if t not in out:
+                out.append(t)
+        return out
 
     def is_leveraged(self, ticker: str) -> bool:
         return ticker.upper() in LEVERAGED_ETFS

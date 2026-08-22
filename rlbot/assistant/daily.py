@@ -205,6 +205,8 @@ def main(argv=None):
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--cash", type=float, default=100_000.0)
     parser.add_argument("--positions", type=Path, default=None)
+    parser.add_argument("--no-sync-positions", action="store_true",
+                        help="skip the Google-Sheet monitor-tab sync")
     args = parser.parse_args(argv)
 
     cfg = RlbotConfig(use_valuation_proxy=True)
@@ -237,6 +239,14 @@ def main(argv=None):
                         "re-run with --download")             # REQ-8.4
 
     pos_path = args.positions or cfg.data.base_path / "positions.csv"
+    if not args.no_sync_positions:
+        from rlbot.data.positions_sheet import fetch_active_positions, write_positions_csv
+        synced, sync_warns = fetch_active_positions(pd.Timestamp.now().normalize())
+        warnings.extend(sync_warns)
+        if synced or not sync_warns:      # reachable sheet (even if empty) wins
+            write_positions_csv(synced, pos_path)
+            warnings.append(f"positions.csv synced from monitor sheet: "
+                            f"{len(synced)} active position(s)")
     positions, pos_warn = load_positions(pos_path)
     if pos_warn:
         warnings.append(pos_warn)

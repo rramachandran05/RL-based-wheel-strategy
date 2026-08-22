@@ -31,6 +31,10 @@ The assistant universe is `tickers + etfs` (config: TQQQ, SPXL, CHPS, SPYI). ETF
 
 Rationale: assignment on a 3x fund is 3x market exposure into whatever regime caused it; the realized-vol premium proxy lags hardest exactly during vol spikes; and the high nominal premium the user targets is preserved anyway, because delta-targeting converts 3x vol into proportionally wider strikes. The brief marks these rows "(3x)" and carries a reduced-size note. **Untested caveat: these caps are reasoned, not gate-validated** — leveraged ETFs were excluded from all walk-forwards (path-dependence + survivorship hazards), so no G-series verdict covers them.
 
+## 1b. Positions sync from the Google Sheet monitor tab (added 2026-08-22)
+
+Each run (unless `--no-sync-positions`) fetches the link-shared monitor tab (sheet `1IW4c…`, gid `1242006061` — the same tab the sibling's `position_monitor.py` reads; `sheet_data.py` vendored for the fetch/parse primitives) and rewrites `positions.csv`. A row is active when it has a ticker, P/C ∈ {CSP, CC}, a parseable strike, and **Exp Date (col D, M/D/YYYY) strictly after today** (`include_today` flips this). Entry Premium (per-share) feeds premium-captured; missing → 0 with a warning. Unreachable sheet → warning + fall back to the existing `positions.csv`, never a crash. `watch_extra` config (NOW, MCHI) extends the assistant universe so sheet positions outside the training 10 + ETFs still get guidance.
+
 ## 2. Operational caveats (printed in every brief)
 
 - Premiums and deltas are **model values** (synthetic BS, calibrated to the PUT index at the index level). Always compare against live broker quotes before trading; if the live premium is materially below model, the compensation gate that justified the trade may not hold.
