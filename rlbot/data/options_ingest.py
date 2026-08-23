@@ -14,9 +14,7 @@ Run:  python -m rlbot.data.options_ingest [--start 2012-01-01] [--tickers ...]
 from __future__ import annotations
 
 import argparse
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -30,44 +28,43 @@ from rlbot.data.unadjusted import load_unadjusted
 AV_URL = "https://www.alphavantage.co/query"
 DTE_MAX = 75
 STRIKE_SPAN = 0.50
-BASE_INTERVAL = 0.80      # ~75 req/min starting pace (global, across workers)
-MIN_INTERVAL = 0.12       # never exceed ~500 req/min
-MAX_INTERVAL = 4.0
-SPEEDUP_EVERY = 300       # successes between gentle speedups
-WORKERS = 8               # concurrent fetches; pacing is global, not per-worker
+# SINGLE-THREADED, evenly paced (2026-08-22 lesson): AV runs a burst detector
+# that flags sub-second clusters even far below the tier's per-minute cap, and
+# requests.Session is not thread-safe — 8 workers produced timeout storms
+# (250 requests / 3.6h). Sequential at ~0.45s ≈ 130 rpm is invisible to the
+# burst detector and completes the whole backfill in ~5h.
+BASE_INTERVAL = 0.45
+MIN_INTERVAL = 0.30
+MAX_INTERVAL = 5.0
+SPEEDUP_EVERY = 500       # successes between gentle speedups
 
 _session = requests.Session()
 
 
 class RateLimiter:
-    """Global token pacing shared by all workers + AIMD adaptation."""
+    """Sequential even pacing + gentle AIMD adaptation."""
 
     def __init__(self, interval: float):
         self.interval = interval
         self.next_ok = time.monotonic()
-        self.lock = threading.Lock()
         self.ok = 0
         self.retries = 0
 
     def acquire(self):
-        with self.lock:
-            t = max(time.monotonic(), self.next_ok)
-            self.next_ok = t + self.interval
-        delay = t - time.monotonic()
+        delay = self.next_ok - time.monotonic()
         if delay > 0:
             time.sleep(delay)
+        self.next_ok = time.monotonic() + self.interval
 
     def success(self):
-        with self.lock:
-            self.ok += 1
-            if self.ok % SPEEDUP_EVERY == 0:
-                self.interval = max(MIN_INTERVAL, self.interval * 0.90)
+        self.ok += 1
+        if self.ok % SPEEDUP_EVERY == 0:
+            self.interval = max(MIN_INTERVAL, self.interval * 0.95)
 
     def throttle(self):
-        with self.lock:
-            self.retries += 1
-            self.interval = min(MAX_INTERVAL, self.interval * 1.30)
-            self.next_ok = time.monotonic() + 15.0
+        self.retries += 1
+        self.interval = min(MAX_INTERVAL, self.interval * 1.20)
+        time.sleep(2.0)
 
 NUMERIC = ["strike", "last", "mark", "bid", "ask", "volume", "open_interest",
            "implied_volatility", "delta", "gamma", "theta", "vega", "rho"]
@@ -84,9 +81,10 @@ def fetch_day(ticker: str, date: str, api_key: str, timeout: int = 60) -> tuple:
         return None, False
     if "data" in j:
         return j["data"], False
-    msg = str(j.get("message") or j.get("Information") or j.get("Note") or "")
-    throttled = "frequency" in msg.lower() or "per minute" in msg.lower() \
-        or "premium" in msg.lower() or "sparingly" in msg.lower()
+    msg = str(j.get("message") or j.get("Information") or j.get("Note") or "").lower()
+    throttled = any(k in msg for k in
+                    ("frequency", "per minute", "premium", "sparingly",
+                     "burst", "spread", "evenly"))
     return None, throttled
 
 
@@ -133,9 +131,7 @@ def _fetch_one(ticker: str, d, close: float, api_key: str, limiter: RateLimiter)
 
 def ingest_ticker_year(ticker: str, year: int, dates: list, closes: dict,
                        api_key: str, out_path: Path, limiter: RateLimiter) -> bool:
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        chunks = list(pool.map(
-            lambda d: _fetch_one(ticker, d, closes[d], api_key, limiter), dates))
+    chunks = [_fetch_one(ticker, d, closes[d], api_key, limiter) for d in dates]
     frames = [c for c in chunks if not c.empty]
     empties = len(chunks) - len(frames)
     result = pd.concat(frames).sort_values(["snapshot_date", "cp", "expiration", "strike"]) \
