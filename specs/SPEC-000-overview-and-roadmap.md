@@ -69,6 +69,10 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 
 > **Ablation 2026-08-22 (trend replaces valuation, SPEC-001 §3.2 gate): FAILED, worst of the three axis variants.** State = regime × trend(3) × vol-comp, momentum-following rule prior, otherwise byte-identical G2 pipeline. Pooled test −0.74%/yr (F1 −0.62%, F2 −0.86%; only 11–23% of episodes positive; sideways segment lagging >2pts in F2) vs −0.04%/yr for the EPS-proxy valuation axis and −0.21%/yr original. Trend deviations from the rule prior look strong in-sample (trend clusters within regimes inflate apparent n_eff) and generalize worst out-of-sample. Conclusion: the trend axis is *worse* than the valuation axis for the learner; the opening-decision question stays closed and trend stays a logged-only feature. Verdict: `reports/ablation_trend_verdict.json`.
 
+> **Real-chain era (2026-08-23, AV Premium; DATA-GAP-1 closed).** 34M chain rows 2012→present, 11 tickers, 0 null IVs, FB/GOOG rename eras merged; spread-aware fills; BS fallback used on ≤0.1% of marks.
+> **B3 real-premium absolutes** (`reports/b3_performance_historical.json`): full 2013–2026 **+30.2% CAGR / −42.6% maxDD** ($100K→$3.64M) — synthetic had undersold by ~6pts/yr; Test-1 +11.0%/−14.2%, Test-2 +12.5%/−12.1%. New finding: WAIT-in-stress cost ~7pts/yr vs B1 in the 2022 bear (bought 4.7pts less DD) because the market-level vol-comp proxy missed the real per-ticker IV richness → **next candidate experiment: per-ticker IV-percentile vol-comp** (now computable).
+> **G3 RETEST on real chains: FAILED — and conclusively.** The learned management table deviated from HOLD in **0 of 67–69 states in both folds** (diff ≡ 0.0): even with real IV-spike economics, no roll/close deviation clears the pessimistic bar — the synthetic run's one marginal edge did not survive real spread costs. M-B2 (mechanical ±3% MOS roll) harmful again on real premiums (−0.9, −1.5 %/yr). **Hold-to-expiry management is now validated on both premium tracks; the management question is closed.**
+
 **MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist.
 
 ## 5. Non-goals (v1)
