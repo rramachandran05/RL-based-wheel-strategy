@@ -108,3 +108,25 @@ def test_env_runs_end_to_end_on_historical_source(tmp_path):
     assert opens
     assert opens[0].contract["premium_source"] == "historical_chain"
     assert res.cycles
+
+
+def test_adjustment_ratio_scales_strikes_and_premiums(tmp_path):
+    """Split-era data: raw 400-strike on a 4:1-split-adjusted $100 stock."""
+    rows = [_row("P", 400.0, 6.40, -0.22), _row("P", 360.0, 3.20, -0.12)]
+    d = tmp_path / "chains" / "SPL"
+    d.mkdir(parents=True)
+    pd.DataFrame(rows).to_parquet(d / "2024.parquet")
+    ratio = pd.Series(0.25, index=pd.bdate_range("2024-03-01", periods=60))
+    src = HistoricalChainPremiumSource("SPL", tmp_path / "chains", adj_ratio=ratio)
+
+    quotes = src.chain(DATE, spot=100.0, vol_proxy=0.3, cp="P")   # adjusted spot
+    strikes = sorted(q.strike for q in quotes)
+    assert strikes == [90.0, 100.0]                # 360*0.25, 400*0.25
+    q100 = next(q for q in quotes if q.strike == 100.0)
+    assert q100.mid == pytest.approx(6.40 * 0.25)
+    assert q100.delta == -0.22                     # greeks are scale-free
+
+    # reprice by ADJUSTED strike finds the raw 400 row via nearest match
+    mid = src.reprice("P", 100.0, EXP, DATE, 100.0, 0.3)
+    assert mid == pytest.approx(1.60)
+    assert src.fallback_count == 0

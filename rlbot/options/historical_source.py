@@ -25,15 +25,34 @@ class HistoricalChainPremiumSource:
     source_name = SOURCE_NAME
 
     def __init__(self, ticker: str, chains_dir: Path,
-                 fallback: SyntheticBSPremiumSource | None = None):
+                 fallback: SyntheticBSPremiumSource | None = None,
+                 adj_ratio: pd.Series | None = None):
+        """adj_ratio: date -> adjClose/close. Chains store RAW strikes and
+        premiums; the simulator lives in adjusted space, so quotes are scaled
+        by the snapshot day's ratio (per-day moneyness preserved exactly;
+        contract lookups use nearest-strike matching to absorb the <1%
+        dividend-adjustment drift across a cycle — a mid-cycle split breaks
+        the match and falls back to BS marks, counted)."""
         self.ticker = ticker
         self.dir = Path(chains_dir) / ticker
         if not self.dir.exists():
             raise FileNotFoundError(f"no chain data for {ticker} under {chains_dir}")
         self.fallback = fallback or SyntheticBSPremiumSource()
+        self.adj_ratio = adj_ratio
         self.fallback_count = 0
         self.request_count = 0
         self._years: dict = {}
+
+    def _ratio(self, date) -> float:
+        if self.adj_ratio is None:
+            return 1.0
+        d = pd.Timestamp(date).normalize()
+        try:
+            return float(self.adj_ratio.loc[d])
+        except KeyError:
+            idx = self.adj_ratio.index
+            pos = idx.searchsorted(d)
+            return float(self.adj_ratio.iloc[max(pos - 1, 0)])
 
     # ------------------------------------------------------------------
     def _year_df(self, year: int) -> pd.DataFrame | None:
@@ -64,10 +83,12 @@ class HistoricalChainPremiumSource:
         day = self._day(date)
         if day is None or day.empty:
             return []          # no chain that day -> caller WAITs (honest gap)
+        ratio = self._ratio(date)
+        spot_raw = spot / ratio
         rows = day[(day["cp"] == cp)
                    & (day["dte"] >= dte_min) & (day["dte"] <= dte_max)
-                   & (day["strike"] >= spot * (1 - strike_span))
-                   & (day["strike"] <= spot * (1 + strike_span))]
+                   & (day["strike"] >= spot_raw * (1 - strike_span))
+                   & (day["strike"] <= spot_raw * (1 + strike_span))]
         quotes = []
         for r in rows.itertuples():
             mid = r.mark if r.mark and r.mark > 0 else (r.bid + r.ask) / 2.0
@@ -75,23 +96,31 @@ class HistoricalChainPremiumSource:
                 continue
             spread = (r.ask - r.bid) / mid if mid > 0 and r.ask >= r.bid else None
             quotes.append(Quote(
-                cp=cp, strike=float(r.strike),
+                cp=cp, strike=float(r.strike) * ratio,
                 expiration=pd.Timestamp(r.expiration), dte=int(r.dte),
-                mid=float(mid), delta=float(r.delta),
+                mid=float(mid) * ratio, delta=float(r.delta),
                 vol_used=float(r.iv) if pd.notna(r.iv) else 0.0,
                 volume=float(r.volume), oi=float(r.open_interest),
                 spread_pct=float(spread) if spread is not None else None,
             ))
         return quotes
 
-    def _contract_row(self, cp, strike, expiration, date):
+    def _contract_row(self, cp, strike_adj, expiration, date):
+        """Nearest raw strike to strike_adj/ratio(date), within 1% tolerance
+        (absorbs dividend-adjustment drift; a mid-cycle split misses -> None)."""
         day = self._day(date)
         if day is None or day.empty:
             return None
+        raw_guess = strike_adj / self._ratio(date)
         rows = day[(day["cp"] == cp)
-                   & (day["strike"].sub(strike).abs() < 1e-6)
                    & (day["expiration"] == pd.Timestamp(expiration))]
-        return rows.iloc[0] if len(rows) else None
+        if not len(rows):
+            return None
+        diffs = (rows["strike"] - raw_guess).abs()
+        pos = int(diffs.values.argmin())      # positional: the day index is duplicated
+        if diffs.iloc[pos] > 0.01 * raw_guess:
+            return None
+        return rows.iloc[pos]
 
     def reprice(self, cp, strike, expiration, date, spot, vol_proxy) -> float:
         self.request_count += 1
@@ -100,7 +129,7 @@ class HistoricalChainPremiumSource:
             mid = row["mark"] if row["mark"] and row["mark"] > 0 \
                 else (row["bid"] + row["ask"]) / 2.0
             if mid and mid > 0:
-                return float(mid)
+                return float(mid) * self._ratio(date)
         self.fallback_count += 1
         return self.fallback.reprice(cp, strike, expiration, date, spot, vol_proxy)
 

@@ -24,7 +24,8 @@ import requests
 
 from rlbot.config import RlbotConfig
 from rlbot.data.env import get_key
-from rlbot.data.sources import DataUnavailable, load_bars
+from rlbot.data.sources import DataUnavailable
+from rlbot.data.unadjusted import load_unadjusted
 
 AV_URL = "https://www.alphavantage.co/query"
 DTE_MAX = 75
@@ -162,10 +163,11 @@ def main(argv=None):
     t0 = time.time()
 
     for ticker in tickers:
-        bars = load_bars(ticker, cfg.data.bars_path)
-        idx = bars.index.tz_localize(None) if bars.index.tz is not None else bars.index
-        closes = dict(zip(idx, bars["Close"].values))
-        dates = [d for d in idx if d >= pd.Timestamp(args.start)]
+        # CRITICAL: chains quote RAW strikes; the ±50% strike filter must use
+        # the UNADJUSTED close (adjusted closes are up to 200x off pre-split).
+        unadj = load_unadjusted(ticker, cfg.data.base_path / "bars_unadj")
+        closes = dict(zip(unadj.index, unadj["close_unadj"].values))
+        dates = [d for d in unadj.index if d >= pd.Timestamp(args.start)]
         by_year: dict = {}
         for d in dates:
             by_year.setdefault(d.year, []).append(d)
