@@ -146,7 +146,13 @@ def ingest_ticker_year(ticker: str, year: int, dates: list, closes: dict,
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", default="2012-01-01")
+    parser.add_argument("--end", default=None,
+                        help="last snapshot date (for predecessor tickers, e.g. FB)")
     parser.add_argument("--tickers", nargs="*", default=None)
+    parser.add_argument("--unadj-alias", default=None,
+                        help="use this ticker's unadjusted closes for strike "
+                             "filtering (predecessor symbols: FB->META, GOOG->GOOGL "
+                             "— the equity is continuous, only the symbol changed)")
     args = parser.parse_args(argv)
 
     cfg = RlbotConfig()
@@ -161,9 +167,11 @@ def main(argv=None):
     for ticker in tickers:
         # CRITICAL: chains quote RAW strikes; the ±50% strike filter must use
         # the UNADJUSTED close (adjusted closes are up to 200x off pre-split).
-        unadj = load_unadjusted(ticker, cfg.data.base_path / "bars_unadj")
+        unadj = load_unadjusted(args.unadj_alias or ticker,
+                                cfg.data.base_path / "bars_unadj")
         closes = dict(zip(unadj.index, unadj["close_unadj"].values))
-        dates = [d for d in unadj.index if d >= pd.Timestamp(args.start)]
+        dates = [d for d in unadj.index if d >= pd.Timestamp(args.start)
+                 and (args.end is None or d <= pd.Timestamp(args.end))]
         by_year: dict = {}
         for d in dates:
             by_year.setdefault(d.year, []).append(d)

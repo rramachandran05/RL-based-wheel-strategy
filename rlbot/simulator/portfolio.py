@@ -52,13 +52,18 @@ def nav(port: Portfolio, spot: float, option_mark: float) -> float:
     return port.cash + port.shares * spot - liability
 
 
-def sell_open_fill(mid: float, cfg: ExecutionConfig) -> float:
-    return mid * (1.0 - cfg.slippage_pct_of_premium)
+def sell_open_fill(mid: float, cfg: ExecutionConfig,
+                   spread_pct: float | None = None) -> float:
+    """SPEC-003 §4: with a real quoted spread, fill = mid − 0.5·(ask−bid);
+    synthetic track (no spread) keeps the flat slippage haircut."""
+    haircut = 0.5 * spread_pct if spread_pct is not None \
+        else cfg.slippage_pct_of_premium
+    return mid * (1.0 - haircut)
 
 
 def open_short_option(port: Portfolio, quote, cfg: ExecutionConfig,
                       tier: int | None = None) -> Portfolio:
-    fill = sell_open_fill(quote.mid, cfg)
+    fill = sell_open_fill(quote.mid, cfg, getattr(quote, "spread_pct", None))
     proceeds = fill * 100 * cfg.contracts - cfg.commission_per_contract * cfg.contracts
     return replace(
         port,

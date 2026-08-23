@@ -35,11 +35,12 @@ def _bh_nav(frame: pd.DataFrame, start, end) -> pd.Series:
     return close / close.iloc[0] * START_CASH
 
 
-def run_window(store, ps, cfg, start, end) -> dict:
+def run_window(store, ps_factory, cfg, start, end) -> dict:
     navs = {"B3": [], "B1": [], "BH": []}
     per_ticker = {}
     for t in cfg.tickers:
         frame = store.frame(t)
+        ps = ps_factory(t)
         env = WheelEnv(t, frame, ps, dynamic_sizing=True)   # full deployment
         b3 = env.run(AdaptiveRulePolicy(), start, end, starting_cash=START_CASH)
         b1 = env.run(FixedWheelPolicy(), start, end, starting_cash=START_CASH)
@@ -50,7 +51,9 @@ def run_window(store, ps, cfg, start, end) -> dict:
         m = nav_metrics(b3.nav)
         per_ticker[t] = {"cagr": m["cagr"], "max_dd": m["max_drawdown"],
                           "final": float(b3.nav.iloc[-1]),
-                          "bh_cagr": nav_metrics(bh)["cagr"]}
+                          "bh_cagr": nav_metrics(bh)["cagr"],
+                          "mark_fallback_share": getattr(ps, "fallback_share", lambda: None)()
+                          if hasattr(ps, "fallback_share") else None}
     pooled = {}
     for name, series_list in navs.items():
         curve = pd.concat(series_list, axis=1).ffill().mean(axis=1)
@@ -61,25 +64,31 @@ def run_window(store, ps, cfg, start, end) -> dict:
     return {"pooled": pooled, "per_ticker": per_ticker}
 
 
-def main():
+def main(source: str = "synthetic"):
     cfg = RlbotConfig(use_valuation_proxy=True)
     gate = require_gate(cfg)
-    ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
+    if source == "historical":
+        from rlbot.options.historical_source import historical_source_for
+        ps_factory = lambda t: historical_source_for(t, cfg, gate["iv_uplift"])
+        note = "REAL AV chains (mids, spread-aware fills); BS fallback for missing marks"
+    else:
+        ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
+        ps_factory = lambda t: ps
+        note = "synthetic-BS premiums (G1-calibrated, iv_uplift={:.2f})".format(gate["iv_uplift"])
     store = FrameStore(cfg)
     results = {}
     for name, (start, end) in WINDOWS.items():
-        print(f"--- {name} ---")
-        results[name] = run_window(store, ps, cfg, start, end)
+        print(f"--- {name} [{source}] ---")
+        results[name] = run_window(store, ps_factory, cfg, start, end)
         p = results[name]["pooled"]
         for k in ("B3", "B1", "BH"):
             print(f"  {k}: CAGR {p[k]['cagr']:+.2%}  maxDD {p[k]['max_dd']:.2%}  "
                   f"$100K -> ${p[k]['final']:,.0f}")
-    out = cfg.data.base_path / "reports" / "b3_performance.json"
+    out = cfg.data.base_path / "reports" / f"b3_performance_{source}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(
-        {"windows": results, "start_cash": START_CASH,
-         "notes": ["synthetic-BS premiums (G1-calibrated, iv_uplift={:.2f})".format(gate["iv_uplift"]),
-                    "pooled = equal-weight average of 10 single-ticker sleeves",
+        {"source": source, "windows": results, "start_cash": START_CASH,
+         "notes": [note, "pooled = equal-weight average of 10 single-ticker sleeves",
                     "survivorship scope DATA-GAP-5 applies", "not investment advice"]},
         indent=2))
     print(f"wrote {out}")
@@ -87,4 +96,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main("historical" if "--historical" in sys.argv else "synthetic")

@@ -133,8 +133,23 @@ class HistoricalChainPremiumSource:
         self.fallback_count += 1
         return self.fallback.reprice(cp, strike, expiration, date, spot, vol_proxy)
 
+    def fallback_share(self) -> float:
+        return self.fallback_count / self.request_count if self.request_count else 0.0
+
     def delta_now(self, cp, strike, expiration, date, spot, vol_proxy) -> float:
         row = self._contract_row(cp, strike, expiration, date)
         if row is not None and pd.notna(row["delta"]):
             return float(row["delta"])
         return self.fallback.delta_now(cp, strike, expiration, date, spot, vol_proxy)
+
+
+def historical_source_for(ticker: str, cfg, iv_uplift: float = 0.0
+                          ) -> HistoricalChainPremiumSource:
+    """Factory: real chains + adj_ratio + synthetic fallback for one ticker."""
+    from rlbot.data.unadjusted import load_adj_ratio
+
+    return HistoricalChainPremiumSource(
+        ticker, cfg.data.base_path / "chains",
+        fallback=SyntheticBSPremiumSource(iv_uplift=iv_uplift),
+        adj_ratio=load_adj_ratio(ticker, cfg),
+    )

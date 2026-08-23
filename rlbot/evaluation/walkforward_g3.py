@@ -71,11 +71,11 @@ def _ab_check(table: MgmtQTable) -> dict:
     return {h: (float(np.mean(v)) if v else None) for h, v in diffs.items()}
 
 
-def run_fold(fold, store, ps, cfg, traj_dir):
+def run_fold(fold, store, ps_factory, cfg, traj_dir):
     print(f"--- G3 fold {fold['name']}: management sweep ---")
     targets = []
     for t in cfg.tickers:
-        tt = sweep_mgmt_ticker(t, store.frame(t), ps, *fold["train"])
+        tt = sweep_mgmt_ticker(t, store.frame(t), ps_factory(t), *fold["train"])
         targets.extend(tt)
         print(f"  {t}: {len(tt)} mgmt targets")
     table = MgmtQTable().fit(targets)
@@ -92,7 +92,7 @@ def run_fold(fold, store, ps, cfg, traj_dir):
         pol_navs, ref_navs, mb2_diffs = [], [], []
         for t in cfg.tickers:
             frame = store.frame(t)
-            env = WheelEnv(t, frame, ps)
+            env = WheelEnv(t, frame, ps_factory(t))
             for start in _episode_starts(frame, *fold[split]):
                 pair = _episode_pair(env, frame, start, LearnedMgmtPolicy(table))
                 if pair is None:
@@ -150,29 +150,36 @@ def g3_verdict(folds: list) -> dict:
             "per_fold_test_diff_ann": tests, "criteria": criteria}
 
 
-def main():
-    cfg = RlbotConfig()
+def main(source: str = "synthetic"):
+    cfg = RlbotConfig(use_valuation_proxy=(source == "historical"))
     gate = require_gate(cfg)                                 # REQ-7.5
-    ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
+    if source == "historical":
+        from rlbot.options.historical_source import historical_source_for
+        ps_factory = lambda t: historical_source_for(t, cfg, gate["iv_uplift"])
+    else:
+        ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
+        ps_factory = lambda t: ps
     store = FrameStore(cfg)
     traj_dir = cfg.data.base_path / "trajectories"
     fold_results = []
     for f in FOLDS:
-        result, table = run_fold(f, store, ps, cfg, traj_dir)
-        table.to_json(cfg.data.base_path / "tables" / f"qmgmt_{f['name']}.json",
+        result, table = run_fold(f, store, ps_factory, cfg, traj_dir)
+        table.to_json(cfg.data.base_path / "tables" / f"qmgmt_{source}_{f['name']}.json",
                       {"fold": f, "gate_iv_uplift": gate["iv_uplift"]})
         fold_results.append(result)
     verdict = g3_verdict(fold_results)
     out = {"g1": {"iv_uplift": gate["iv_uplift"], "pass": gate["pass"]},
-           "g3": verdict, "folds": fold_results,
+           "source": source, "g3": verdict, "folds": fold_results,
            "disclaimer": ("Survivorship scope (DATA-GAP-5) applies. Openings "
                            "fixed to Baseline 3 in both arms; management only.")}
     report_dir = cfg.data.base_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "g3_verdict.json").write_text(json.dumps(out, indent=2))
+    name = "g3_retest_verdict.json" if source == "historical" else "g3_verdict.json"
+    (report_dir / name).write_text(json.dumps(out, indent=2))
     print(json.dumps({"g3": verdict}, indent=2))
     return out
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main("historical" if "--historical" in sys.argv else "synthetic")
