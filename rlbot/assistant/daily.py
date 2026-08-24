@@ -210,13 +210,14 @@ def main(argv=None):
                         help="skip the Google-Sheet monitor-tab sync")
     parser.add_argument("--no-real-quotes", action="store_true",
                         help="skip the daily chain fetch; synthetic quotes only")
-    parser.add_argument("--ticker-iv-volcomp", action="store_true",
-                        help="use per-ticker IV percentile vol comp (G4 experiment)")
+    parser.add_argument("--market-volcomp", action="store_true",
+                        help="revert to the market-proxy vol comp (per-ticker "
+                             "IV is the default since G4 passed, 2026-08-23)")
     args = parser.parse_args(argv)
 
     cfg = RlbotConfig(
         use_valuation_proxy=True,
-        vol_comp_source="ticker_iv" if args.ticker_iv_volcomp else "market",
+        vol_comp_source="market" if args.market_volcomp else "ticker_iv",
     )
     warnings = []
     if args.download:
@@ -228,7 +229,7 @@ def main(argv=None):
             bad = {t: s for t, s in chain_status.items() if s.startswith("error")}
             if bad:
                 warnings.append(f"chain refresh issues: {bad}")
-            if args.ticker_iv_volcomp:
+            if not args.market_volcomp:
                 from rlbot.features.ticker_iv import build_all as build_tiv
                 build_tiv(cfg)
     gate = require_gate(cfg)
