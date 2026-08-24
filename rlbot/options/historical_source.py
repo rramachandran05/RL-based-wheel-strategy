@@ -16,9 +16,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from rlbot.options.premium_source import Quote, SyntheticBSPremiumSource
+from rlbot.options.premium_source import Quote, SyntheticBSPremiumSource, bs_delta
 
 SOURCE_NAME = "historical_chain"
+
+
+def _greeks_degenerate(delta, iv) -> bool:
+    """Predecessor-symbol eras (FB, old GOOG) carry placeholder greeks:
+    delta pinned at ±1/0 and IV ~0.015 flat. Prices are real; greeks are not."""
+    return pd.isna(delta) or pd.isna(iv) or iv <= 0.03 or abs(delta) >= 0.995 \
+        or delta == 0.0
 
 
 class HistoricalChainPremiumSource:
@@ -41,6 +48,7 @@ class HistoricalChainPremiumSource:
         self.adj_ratio = adj_ratio
         self.fallback_count = 0
         self.request_count = 0
+        self.greek_fallback_count = 0   # real mark kept, BS delta substituted
         self._years: dict = {}
 
     def _ratio(self, date) -> float:
@@ -92,14 +100,24 @@ class HistoricalChainPremiumSource:
         quotes = []
         for r in rows.itertuples():
             mid = r.mark if r.mark and r.mark > 0 else (r.bid + r.ask) / 2.0
-            if not mid or mid <= 0.01 or pd.isna(r.delta):
+            if not mid or mid <= 0.01:
                 continue
             spread = (r.ask - r.bid) / mid if mid > 0 and r.ask >= r.bid else None
+            if _greeks_degenerate(r.delta, r.iv):
+                # real price, junk greeks: substitute BS delta on the vol proxy
+                if vol_proxy is None or vol_proxy <= 0:
+                    continue
+                self.greek_fallback_count += 1
+                delta = bs_delta(cp, spot, float(r.strike) * ratio,
+                                 int(r.dte) / 365.0, float(vol_proxy))
+                vol_used = float(vol_proxy)
+            else:
+                delta = float(r.delta)
+                vol_used = float(r.iv)
             quotes.append(Quote(
                 cp=cp, strike=float(r.strike) * ratio,
                 expiration=pd.Timestamp(r.expiration), dte=int(r.dte),
-                mid=float(mid) * ratio, delta=float(r.delta),
-                vol_used=float(r.iv) if pd.notna(r.iv) else 0.0,
+                mid=float(mid) * ratio, delta=delta, vol_used=vol_used,
                 volume=float(r.volume), oi=float(r.open_interest),
                 spread_pct=float(spread) if spread is not None else None,
             ))
@@ -138,7 +156,7 @@ class HistoricalChainPremiumSource:
 
     def delta_now(self, cp, strike, expiration, date, spot, vol_proxy) -> float:
         row = self._contract_row(cp, strike, expiration, date)
-        if row is not None and pd.notna(row["delta"]):
+        if row is not None and not _greeks_degenerate(row["delta"], row["iv"]):
             return float(row["delta"])
         return self.fallback.delta_now(cp, strike, expiration, date, spot, vol_proxy)
 

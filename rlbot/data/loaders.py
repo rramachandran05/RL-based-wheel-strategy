@@ -32,6 +32,14 @@ class FrameStore:
                     f"use_valuation_proxy=True but {path} missing; "
                     "run python -m rlbot.data.eps_proxy")
             self._proxy = pd.read_parquet(path)
+        self._ticker_iv = None
+        if getattr(cfg, "vol_comp_source", "market") == "ticker_iv":
+            tiv_path = cfg.data.canonical_path / "ticker_iv.parquet"
+            if not tiv_path.exists():
+                raise FileNotFoundError(
+                    f"vol_comp_source='ticker_iv' but {tiv_path} missing; "
+                    "run python -m rlbot.features.ticker_iv")
+            self._ticker_iv = pd.read_parquet(tiv_path)
         self._cache: dict = {}
 
     def frame(self, ticker: str) -> pd.DataFrame:
@@ -39,5 +47,6 @@ class FrameStore:
             self._cache[ticker] = build_ticker_frame(
                 ticker, self.tables["underlying"], self.tables["market"],
                 self.tables["valuation"], self.cfg, valuation_proxy=self._proxy,
+                ticker_iv=self._ticker_iv,
             )
         return self._cache[ticker]

@@ -30,6 +30,7 @@ def build_ticker_frame(
     valuation: pd.DataFrame,    # canonical (may be empty)
     cfg: RlbotConfig,
     valuation_proxy: pd.DataFrame | None = None,   # SPEC-007 Track B
+    ticker_iv: pd.DataFrame | None = None,         # G4: per-ticker vol comp
 ) -> pd.DataFrame:
     u = underlying[underlying["ticker"] == ticker].drop(columns=["ticker"]).copy()
     rv_col = f"realized_vol_{cfg.data.realized_vol_ticker_window}"
@@ -48,6 +49,17 @@ def build_ticker_frame(
     frame["fv_dist"] = (frame["close"] - frame["fv_buy"]) / frame["fv_buy"]
     frame["valuation_state"] = classify_valuation_series(frame["fv_dist"], cfg.valuation)
     frame.loc[frame["fv_dist"].isna(), "valuation_state"] = pd.NA
+
+    # G4: per-ticker IV vol comp where real-chain IV exists; the validated
+    # market proxy fills the rest (same enum, same thresholds).
+    if ticker_iv is not None and not ticker_iv.empty:
+        tiv = ticker_iv[ticker_iv["ticker"] == ticker]
+        if not tiv.empty:
+            v = tiv["vol_comp_ticker"].reindex(frame.index)
+            use = v.notna()
+            frame.loc[use, "vol_compensation"] = v[use]
+            frame["iv_pct_ticker"] = tiv["iv_pct_5y"].reindex(frame.index)
+            frame["atm_iv"] = tiv["atm_iv"].reindex(frame.index)
 
     # Track B: sheet-based FV wins where present; EPS-percentile proxy fills
     # the rest (SPEC-007 §3.1). Absent both -> NA -> FAIR at encode time.

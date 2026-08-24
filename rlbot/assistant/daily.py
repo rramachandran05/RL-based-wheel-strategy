@@ -37,10 +37,10 @@ VC_NAMES = {0: "POOR", 1: "NORMAL", 2: "ATTRACTIVE"}
 MGMT_NOTE = ("Validated guidance is HOLD to expiration. G3 evidence: mechanical "
              "MOS-based rolling cost 1.2-2.3%/yr vs holding. Flags below are "
              "attention signals, not roll instructions.")
-MODEL_NOTE = ("Premiums/deltas are synthetic-BS model values (G1-calibrated at "
-              "index level). Compare with live broker quotes before acting; if "
-              "live premium is materially below model, the compensation case "
-              "may not hold. Recommendations only - not investment advice.")
+MODEL_NOTE = ("Quotes marked historical_chain are REAL previous-close chain "
+              "mids/deltas (AV); synthetic_bs rows are model values. Either "
+              "way, confirm against your broker's live quote before acting. "
+              "Recommendations only - not investment advice.")
 LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "WAIT in any stress regime). Assignment means 3x market "
                   "exposure; model premiums are least reliable on these names "
@@ -85,7 +85,8 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
         "type": "PUT", "strike": quote.strike,
         "expiration": str(quote.expiration.date()), "dte": quote.dte,
         "delta": round(quote.delta, 4), "model_premium": round(quote.mid, 2),
-        "premium_source": "synthetic_bs", "candidates_considered": n_cands,
+        "premium_source": getattr(ps, "source_name", "synthetic_bs"),
+        "candidates_considered": n_cands,
     }
     return out
 
@@ -142,7 +143,7 @@ def decision_record(rec: dict, cash: float, run_id: str, seq: int) -> dict | Non
         contract = {"type": c["type"], "strike": c["strike"],
                     "expiration": c["expiration"], "dte": c["dte"],
                     "delta": c["delta"], "premium_fill": c["model_premium"],
-                    "premium_source": "synthetic_bs",
+                    "premium_source": c.get("premium_source", "synthetic_bs"),
                     "candidates_considered": c["candidates_considered"]}
     action = {"WAIT": 0, "SELL_PUT": None}.get(rec["action"], 0)
     if action is None:
@@ -207,17 +208,47 @@ def main(argv=None):
     parser.add_argument("--positions", type=Path, default=None)
     parser.add_argument("--no-sync-positions", action="store_true",
                         help="skip the Google-Sheet monitor-tab sync")
+    parser.add_argument("--no-real-quotes", action="store_true",
+                        help="skip the daily chain fetch; synthetic quotes only")
+    parser.add_argument("--ticker-iv-volcomp", action="store_true",
+                        help="use per-ticker IV percentile vol comp (G4 experiment)")
     args = parser.parse_args(argv)
 
-    cfg = RlbotConfig(use_valuation_proxy=True)
+    cfg = RlbotConfig(
+        use_valuation_proxy=True,
+        vol_comp_source="ticker_iv" if args.ticker_iv_volcomp else "market",
+    )
+    warnings = []
     if args.download:
         from rlbot.data.build import build_all
         build_all(RlbotConfig(), download=True)
+        if not args.no_real_quotes:
+            from rlbot.data.daily_chain_update import update_daily_chains
+            chain_status = update_daily_chains(cfg)
+            bad = {t: s for t, s in chain_status.items() if s.startswith("error")}
+            if bad:
+                warnings.append(f"chain refresh issues: {bad}")
+            if args.ticker_iv_volcomp:
+                from rlbot.features.ticker_iv import build_all as build_tiv
+                build_tiv(cfg)
     gate = require_gate(cfg)
-    ps = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
-    store = FrameStore(cfg)
+    synth = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
 
-    warnings = []
+    def ps_for(ticker, last_date):
+        """Real prev-close chains when today's snapshot exists; synthetic else."""
+        if args.no_real_quotes:
+            return synth
+        try:
+            from rlbot.options.historical_source import historical_source_for
+            src = historical_source_for(ticker, cfg, gate["iv_uplift"])
+            day = src._day(last_date)
+            if day is not None and not day.empty:
+                return src
+        except Exception:
+            pass
+        return synth
+
+    store = FrameStore(cfg)
     recs, guides = [], []
     latest = None
     for t in cfg.assistant_universe:
@@ -232,8 +263,8 @@ def main(argv=None):
         latest = max(latest or frame.index[-1], frame.index[-1])
         lev = cfg.is_leveraged(t)
         policy = LeveragedETFPolicy() if lev else AdaptiveRulePolicy()
-        recs.append(recommend_opening(t, frame, ps, args.cash,
-                                      policy=policy, leveraged=lev))
+        recs.append(recommend_opening(t, frame, ps_for(t, frame.index[-1]),
+                                      args.cash, policy=policy, leveraged=lev))
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
@@ -253,7 +284,8 @@ def main(argv=None):
     for p in positions:
         tkr = str(p["ticker"]).upper()
         if tkr in cfg.assistant_universe:
-            guides.append(guide_position(p, store.frame(tkr), ps))
+            frame_t = store.frame(tkr)
+            guides.append(guide_position(p, frame_t, ps_for(tkr, frame_t.index[-1])))
         else:
             warnings.append(f"position ticker {tkr} not in universe; skipped")
 

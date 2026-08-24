@@ -89,6 +89,10 @@ class RlbotConfig:
     # SPEC-007 Track B: fill the historically-dead valuation axis from the
     # AV EPS percentile proxy where no sheet-based FV snapshot exists
     use_valuation_proxy: bool = False
+    # SPEC-002 §3.5: "market" = VIX-based proxy (validated baseline);
+    # "ticker_iv" = per-ticker ATM-IV percentile from real chains where
+    # available, market proxy elsewhere (G4 experiment, 2026-08-23)
+    vol_comp_source: str = "market"
 
     @property
     def assistant_universe(self) -> list:

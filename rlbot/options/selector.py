@@ -40,7 +40,14 @@ class SelectorConfig:
     # spec's volume>=10 pending calibration on real chains.
     min_volume: float = 0.0
     min_oi: float = 100.0
-    max_spread_pct: float = 0.10
+    # Junk-quote screen, not a cost control: the fill model already charges
+    # half the spread, so wide spreads self-penalize. Close-snapshot spreads
+    # on healthy-OI monthlies run 12-17% (V/MA), hence 0.20.
+    max_spread_pct: float = 0.20
+    # Cheap OTM options carry structurally wide %-spreads (a $0.05 spread on a
+    # $0.30 put is 17% yet perfectly tradeable): allow spread up to
+    # max(max_spread_pct, spread_floor_dollars / mid).
+    spread_floor_dollars: float = 0.05
 
 
 def _band_for(action) -> tuple:
@@ -52,9 +59,11 @@ def _band_for(action) -> tuple:
 def _liquid(q, cfg: SelectorConfig) -> bool:
     if q.oi is None:                      # synthetic track: no liquidity data
         return True
+    spread_cap = max(cfg.max_spread_pct,
+                     cfg.spread_floor_dollars / max(q.mid, 1e-6))
     return ((q.volume or 0) >= cfg.min_volume
             and (q.oi or 0) >= cfg.min_oi
-            and (q.spread_pct if q.spread_pct is not None else 1.0) <= cfg.max_spread_pct)
+            and (q.spread_pct if q.spread_pct is not None else 1.0) <= spread_cap)
 
 
 def _filter(quotes, band, dte_min, dte_max, cfg: SelectorConfig = None):
