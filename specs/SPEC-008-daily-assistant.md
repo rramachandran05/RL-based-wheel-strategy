@@ -57,8 +57,8 @@ Each run (unless `--no-sync-positions`) fetches the link-shared monitor tab (she
 `rlbot/data/fv_snapshot.py` replaces the last runtime dependency on the
 sibling repo: each `--download` run fetches the FV sheet tab (id `1IW4c…`,
 gid `274275982`), applies the sibling's exact anchor semantics
-(fv_buy = min(FMP, Morningstar, Stock Oracle); fv_sell = max(FMP,
-Morningstar, price); ±6/12/18% whole-dollar ladders; 9-month volume-profile
+(fv_buy = min(FMP, TipRanks mean, Stock Oracle); fv_sell = max(FMP,
+TipRanks mean, price); ±6/12/18% whole-dollar ladders; 9-month volume-profile
 proxy where no sheet FV), and writes sibling-schema snapshots to
 `data_local/fv_snapshots/`. The valuation table merges legacy sibling
 snapshots with the new directory (newest wins per date+ticker). Sheet

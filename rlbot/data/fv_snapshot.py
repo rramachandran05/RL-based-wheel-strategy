@@ -1,9 +1,10 @@
 """Fair-value snapshotting, ported from ../wheel-strategy/fv_levels.py
 (2026-08-23) so the sibling repo is no longer a runtime dependency.
 
-Semantics preserved exactly (golden-tested):
-  fv_buy  = min(fmp_median, morningstar, stock_oracle)   over present inputs
-  fv_sell = max(fmp_median, morningstar, current_price)  over present inputs
+Semantics preserved exactly (golden-tested); sheet columns updated
+2026-08-23 — the analyst column is now "TipRanks (mean)" (was Morningstar):
+  fv_buy  = min(fmp_median, tipranks_mean, stock_oracle)  over present inputs
+  fv_sell = max(fmp_median, tipranks_mean, current_price) over present inputs
   ladders = whole-dollar rungs at ±6/12/18%
   ETFs (no sheet FV): 9-month volume-profile nearest support/resistance proxy
   confidence: high (3 inputs) / medium (2) / low (1)
@@ -36,22 +37,22 @@ _TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
 
 
 def parse_fv_rows(raw_rows: list) -> dict:
-    """{TICKER: {"morningstar": float|None, "stock_oracle": float|None}}"""
+    """{TICKER: {"tipranks": float|None, "stock_oracle": float|None}}"""
     out = {}
     for row in rows_to_dicts(raw_rows, FV_HEADER_ROW):
         t = normalize_ticker(row.get("Stock", ""))
         if not t or t == "STOCK" or not _TICKER_RE.match(t):
             continue
         out[t] = {
-            "morningstar": parse_dollar(row.get("Morningstar", "")),
+            "tipranks": parse_dollar(row.get("TipRanks (mean)", "")),
             "stock_oracle": parse_dollar(row.get("Stock Oracle (Intrinsic Value)", "")),
         }
     return out
 
 
-def fv_anchors(morningstar, stock_oracle, fmp_median, current_price):
-    buys = [v for v in (fmp_median, morningstar, stock_oracle) if v]
-    sells = [v for v in (fmp_median, morningstar, current_price) if v]
+def fv_anchors(tipranks, stock_oracle, fmp_median, current_price):
+    buys = [v for v in (fmp_median, tipranks, stock_oracle) if v]
+    sells = [v for v in (fmp_median, tipranks, current_price) if v]
     if not buys or not sells:
         raise ValueError("no valuation inputs")
     return min(buys), max(sells)
@@ -101,12 +102,12 @@ def snapshot_fair_value(cfg: RlbotConfig, date_str: str | None = None) -> Path:
             continue
         price = float(bars["Close"].iloc[-1])
         row = sheet.get(t, {})
-        ms, so = row.get("morningstar"), row.get("stock_oracle")
-        fmp = fmp_price_target_median(t) if (ms or so) else None
+        tr, so = row.get("tipranks"), row.get("stock_oracle")
+        fmp = fmp_price_target_median(t) if (tr or so) else None
         try:
-            if ms or so or fmp:
-                fv_buy, fv_sell = fv_anchors(ms, so, fmp, price)
-                n_inputs = sum(1 for v in (ms, so, fmp) if v)
+            if tr or so or fmp:
+                fv_buy, fv_sell = fv_anchors(tr, so, fmp, price)
+                n_inputs = sum(1 for v in (tr, so, fmp) if v)
                 source = "sheet+fmp" if fmp else "sheet"
                 confidence = {3: "high", 2: "medium"}.get(n_inputs, "low")
             else:

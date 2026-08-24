@@ -12,7 +12,7 @@ from tests.conftest import make_ohlcv
 
 
 def test_anchor_semantics_match_sibling():
-    """fv_buy = min(fmp, ms, so); fv_sell = max(fmp, ms, price)."""
+    """fv_buy = min(fmp, tipranks, so); fv_sell = max(fmp, tipranks, price)."""
     assert fv_anchors(110.0, 95.0, 105.0, 120.0) == (95.0, 120.0)
     # stock_oracle excluded from sell side; price included
     assert fv_anchors(110.0, 200.0, None, 90.0) == (110.0, 110.0)
@@ -28,15 +28,17 @@ def test_ladders_whole_dollar():
 
 
 def test_parse_fv_rows_fixture():
-    header = ["Stock", "Morningstar", "Stock Oracle (Intrinsic Value)", "Current Price"]
-    raw = [["SET UP", "", "", ""], header,
-           ["AAPL", "$210", "$195.50", "$230"],
-           ["brk.b", "", "$480", "$495"],
-           ["STOCK", "", "", ""],            # skip-token
-           ["Ticker", "", "", ""],           # stray sub-header (no valid values ok)
-           ["", "$1", "", ""]]
+    header = ["Stock", "low", "high", "median", "TipRanks (mean)",
+              "Stock Oracle (Intrinsic Value)", "Min Buy Value", "Current Price"]
+    pad = lambda cells: cells + [""] * (len(header) - len(cells))
+    raw = [pad(["SET UP"]), header,
+           pad(["AAPL", "", "", "", "$210", "$195.50", "", "$230"]),
+           pad(["brk.b", "", "", "", "", "$480", "", "$495"]),
+           pad(["STOCK"]),                   # skip-token
+           pad(["Ticker"]),                  # stray sub-header
+           pad(["", "", "", "", "$1"])]
     parsed = parse_fv_rows(raw)
-    assert parsed["AAPL"] == {"morningstar": 210.0, "stock_oracle": 195.5}
+    assert parsed["AAPL"] == {"tipranks": 210.0, "stock_oracle": 195.5}
     assert parsed["BRK-B"]["stock_oracle"] == 480.0
     assert "STOCK" not in parsed
 
