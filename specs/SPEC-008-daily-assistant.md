@@ -51,3 +51,17 @@ Each run (unless `--no-sync-positions`) fetches the link-shared monitor tab (she
 - **AC-1** Smoke test: canned frame → recommendation object with contract in the action's delta band and risk_checks passed.
 - **AC-2** Positions fixture (one safe CSP, one breached CC) → HOLD guidance with correct flags.
 - **AC-3** A real run produces the three artifacts and `decisions.jsonl` lines that validate.
+
+## 1c. FV snapshotting ported in-house (2026-08-23)
+
+`rlbot/data/fv_snapshot.py` replaces the last runtime dependency on the
+sibling repo: each `--download` run fetches the FV sheet tab (id `1IW4c…`,
+gid `274275982`), applies the sibling's exact anchor semantics
+(fv_buy = min(FMP, Morningstar, Stock Oracle); fv_sell = max(FMP,
+Morningstar, price); ±6/12/18% whole-dollar ladders; 9-month volume-profile
+proxy where no sheet FV), and writes sibling-schema snapshots to
+`data_local/fv_snapshots/`. The valuation table merges legacy sibling
+snapshots with the new directory (newest wins per date+ticker). Sheet
+unreachable → warning, stale-decay as before. **../wheel-strategy is now
+archive/provenance only; the Google Sheet itself (FV tab + monitor tab)
+remains the live system of record.**

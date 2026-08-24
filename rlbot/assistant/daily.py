@@ -223,6 +223,12 @@ def main(argv=None):
     if args.download:
         from rlbot.data.build import build_all
         build_all(RlbotConfig(), download=True)
+        try:                                  # FV snapshot (ported from sibling)
+            from rlbot.data.fv_snapshot import refresh_valuation, snapshot_fair_value
+            snapshot_fair_value(cfg)
+            refresh_valuation(cfg)
+        except Exception as e:
+            warnings.append(f"FV snapshot skipped: {e}")
         if not args.no_real_quotes:
             from rlbot.data.daily_chain_update import update_daily_chains
             chain_status = update_daily_chains(cfg)
