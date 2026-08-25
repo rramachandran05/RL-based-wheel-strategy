@@ -70,3 +70,12 @@ def test_positions_file_degradation(tmp_path):
                     "AAPL,CSP,180,2026-09-18,2.10\n")
     rows, warn = load_positions(good)
     assert warn is None and rows[0]["ticker"] == "AAPL"
+
+
+def test_brief_includes_legend():
+    from rlbot.assistant.daily import LEGEND, render_brief
+    md = render_brief("2026-08-24", [], [], [])
+    assert "## Legend" in md
+    for term in ("BULL_LOW_VOL", "BEAR_STRESS", "PUT_BALANCED", "TipRanks",
+                 "challenged", "0.25–0.35"):
+        assert term in md, term

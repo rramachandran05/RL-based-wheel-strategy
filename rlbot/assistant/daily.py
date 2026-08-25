@@ -46,6 +46,44 @@ LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "exposure; model premiums are least reliable on these names "
                   "(vol clustering) — consider reduced contract size.")
 
+LEGEND = """## Legend
+
+**State column** = `market regime / valuation / vol-compensation` — the three inputs the rule policy conditions on.
+
+| Market regime | Definition (from SPY + VIX) |
+|---|---|
+| BULL_LOW_VOL | SPY above its 200-day SMA, drawdown > −10%, VIX below its 5-yr 60th percentile |
+| BULL_HIGH_VOL | Same bull structure, but VIX at/above its 60th percentile |
+| SIDEWAYS | Neither bull nor stress conditions met |
+| BEAR_STRESS | SPY below 200-SMA with ≥10% drawdown, or drawdown ≤ −15%, or VIX ≥ 85th percentile |
+
+| Valuation | Definition (vs the FV-buy anchor = min of FMP median, TipRanks mean, Stock Oracle) |
+|---|---|
+| ATTRACTIVE | Price more than 5% below the anchor |
+| FAIR | Within ±5% of the anchor, or no valuation data |
+| EXPENSIVE | Price more than 5% above the anchor |
+
+| Vol-compensation | Definition (per-ticker ATM-IV where chains exist; VIX proxy otherwise) |
+|---|---|
+| POOR | IV below realized vol, or IV percentile < 20th — thin premium for the risk |
+| NORMAL | In between |
+| ATTRACTIVE | IV ≥ 2 pts over realized vol AND IV percentile ≥ 60th — rich premium |
+
+**Actions.** The policy picks a risk tier; the selector converts it to a contract:
+
+| Tier | Target put delta | When the rules choose it |
+|---|---|---|
+| WAIT | — | Bear/stress (unless vol-comp ATTRACTIVE), or no liquid contract in band |
+| PUT_DEFENSIVE | 0.05–0.10 | Stress + attractive vol-comp only |
+| PUT_CONSERVATIVE | 0.10–0.18 | Sideways, or bull + EXPENSIVE valuation |
+| PUT_BALANCED | 0.18–0.25 | Bull + FAIR valuation (also the 3x cap) |
+| PUT_AGGRESSIVE | 0.25–0.35 | Bull + ATTRACTIVE valuation |
+
+The Δ column is the selected contract's actual delta (≈ assignment probability); DTE targets 25–45 days. Leveraged ETFs (3x) cap at BALANCED and always WAIT in stress.
+
+**Position guidance.** HOLD to expiration is the validated default (rolling on margin-of-safety triggers tested 1.2–2.3%/yr worse). Flags are attention signals: `BREACHED` = option in the money; `challenged` = |delta| ≥ 0.40; `expiry week` = ≤ 7 days left. A breached covered call at/above your cost basis is the wheel's intended profit-taking exit, not a failure.
+"""
+
 
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False) -> dict:
@@ -198,6 +236,7 @@ def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
                          f"| **{g['guidance']}** | {'; '.join(g['attention_flags']) or '—'} |")
     else:
         lines.append("_No open positions on file._")
+    lines += ["", LEGEND]
     return "\n".join(lines) + "\n"
 
 
