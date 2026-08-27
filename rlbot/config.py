@@ -48,6 +48,22 @@ class ValuationThresholds:
     band: float = 0.05
 
 
+@dataclass(frozen=True)
+class ValuationGateConfig:
+    """SPEC-009 valuation gates fed by ../fair-value-discount (SPEC-002).
+
+    Boundaries (recomputed against live spot):
+        put ceiling = min(wheel_fv x (1 - put_required_mos), spot x (1 - D))
+        exit floor  = max(exit_floor_factor x wheel_fv,
+                          cost_basis x (1 + min_call_gain))
+    """
+    enabled: bool = True
+    max_age_days: int = 7            # older ensemble CSV -> gates no-op
+    spot_discount: float = 0.05      # D: assignment >= 5% below spot
+    exit_floor_factor: float = 0.95  # fundamental exit floor = f x wheel_fv
+    min_call_gain: float = 0.10     # economic exit floor over cost basis
+
+
 @dataclass
 class DataConfig:
     base_path: Path = field(default_factory=lambda: _default_base_path())
@@ -60,6 +76,11 @@ class DataConfig:
     # Sibling project whose fair_value_*.csv snapshots we ingest (SPEC-002 §3.4)
     fair_value_snapshot_dir: Path = field(
         default_factory=lambda: PROJECT_ROOT.parent / "wheel-strategy" / "wheel_outputs"
+    )
+    # SPEC-009: fair-value-discount ensemble CSVs (wheel_fv, reliability,
+    # put_required_mos, sentiment) consumed by the valuation gates
+    fv_ensemble_dir: Path = field(
+        default_factory=lambda: PROJECT_ROOT.parent / "fair-value-discount" / "fv_outputs"
     )
 
     @property
@@ -110,3 +131,4 @@ class RlbotConfig:
     regime: RegimeThresholds = field(default_factory=RegimeThresholds)
     vol_comp: VolCompThresholds = field(default_factory=VolCompThresholds)
     valuation: ValuationThresholds = field(default_factory=ValuationThresholds)
+    val_gates: ValuationGateConfig = field(default_factory=ValuationGateConfig)

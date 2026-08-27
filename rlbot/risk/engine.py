@@ -44,10 +44,25 @@ def validate_open(
     open_put_escrow: float,     # Σ strike·100·contracts of already-open short puts
     event_in_window: bool,
     cfg: RiskConfig,
+    *,
+    valuation=None,             # WheelValuation or None (SPEC-009 VREQ-4)
+    spot: float | None = None,
+    cost_basis: float | None = None,
+    val_cfg=None,
 ) -> RiskDecision:
     if quote is None:
         return RiskDecision(True)
     flags = []
+    if valuation is not None:   # valuation gates (RL proposes, this disposes)
+        from rlbot.config import ValuationGateConfig
+        from rlbot.risk.valuation import call_gate_flags, put_gate_flags
+        vcfg = val_cfg or ValuationGateConfig()
+        if quote.cp == "P":
+            flags += put_gate_flags(quote.strike, quote.mid, valuation,
+                                    spot or 0.0, vcfg)
+        else:
+            flags += call_gate_flags(quote.strike, quote.mid, valuation,
+                                     cost_basis, vcfg)
     notional = quote.strike * 100 * contracts
 
     if quote.cp == "P":

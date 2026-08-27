@@ -101,6 +101,8 @@ def select_contract(
     valuation_state,
     cost_basis: float | None = None,
     cfg: SelectorConfig = SelectorConfig(),
+    valuation=None,             # WheelValuation or None (SPEC-009 VREQ-5)
+    val_cfg=None,
 ):
     """Returns (best_quote_or_None, n_candidates). None => tier unimplementable → WAIT."""
     if isinstance(action, CashAction) and action == CashAction.WAIT:
@@ -116,6 +118,16 @@ def select_contract(
         candidates = _filter(quotes, widened, dte_min, dte_max, cfg)
     if cost_basis is not None:
         candidates = [q for q in candidates if q.cp != "C" or q.strike >= cost_basis]
+    if valuation is not None:   # SPEC-009: net-basis boundaries pre-filter
+        from rlbot.config import ValuationGateConfig
+        from rlbot.risk.valuation import exit_floor, put_ceiling
+        vcfg = val_cfg or ValuationGateConfig()
+        ceiling = put_ceiling(valuation, spot, vcfg)
+        floor = exit_floor(valuation, cost_basis, vcfg)
+        candidates = [q for q in candidates
+                      if ((q.strike - q.mid <= ceiling + 1e-9)
+                          if q.cp == "P"
+                          else (q.strike + q.mid >= floor - 1e-9))]
     if not candidates:
         return None, 0
 

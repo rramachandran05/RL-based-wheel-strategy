@@ -20,6 +20,8 @@ from rlbot.learning.trajectories import validate_record
 from rlbot.options.premium_source import SyntheticBSPremiumSource
 from rlbot.options.selector import SelectorConfig, select_contract
 from rlbot.risk.engine import RiskConfig, validate_open
+from rlbot.risk.valuation import (clamp_action, exit_floor, premium_required,
+                                  put_ceiling, wheel_regime)
 from rlbot.simulator.portfolio import ExecutionConfig
 from rlbot.state.encoder import encode_q_state
 from rlbot.state.enums import CashAction, PositionState, legal_actions
@@ -41,6 +43,12 @@ MODEL_NOTE = ("Quotes marked historical_chain are REAL previous-close chain "
               "mids/deltas (AV); synthetic_bs rows are model values. Either "
               "way, confirm against your broker's live quote before acting. "
               "Recommendations only - not investment advice.")
+VAL_GATE_NOTE = ("Valuation gates (SPEC-009) use the fair-value-discount "
+                 "ensemble's Wheel FV: puts must land a net basis "
+                 "(strike - premium) at/below the acquisition ceiling and "
+                 "are masked by regime (no puts on VERY_EXPENSIVE names); "
+                 "'Prem req' is the minimum LIVE premium that makes the "
+                 "strike acceptable - check it against your broker quote.")
 LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "WAIT in any stress regime). Assignment means 3x market "
                   "exposure; model premiums are least reliable on these names "
@@ -81,12 +89,15 @@ LEGEND = """## Legend
 
 The Δ column is the selected contract's actual delta (≈ assignment probability); DTE targets 25–45 days. Leveraged ETFs (3x) cap at BALANCED and always WAIT in stress.
 
+**Valuation gates (SPEC-009).** Wheel FV comes from the fair-value-discount ensemble (reliability-weighted intrinsic + haircut analyst target). Regime = spot/Wheel FV: <0.80 DEEP_UNDERVALUED, <0.95 UNDERVALUED, ≤1.05 FAIR_VALUED, ≤1.20 EXPENSIVE, >1.20 VERY_EXPENSIVE. Puts are masked by regime (VERY_EXPENSIVE → no puts; EXPENSIVE caps at CONSERVATIVE) and every candidate must land `strike − premium ≤ Ceiling = min(FV·(1−MOS), spot·0.95)`. `Prem req` = the minimum live premium making the shown strike acceptable. Open CSPs/CCs are flagged when their filled net basis / effective exit violates the boundary. Calls on DEEP_UNDERVALUED names are capped at DEFENSIVE (don't sell away large fundamental upside for a few dollars of premium). Stale or missing valuation data disables all of this (warning shown).
+
 **Position guidance.** HOLD to expiration is the validated default (rolling on margin-of-safety triggers tested 1.2–2.3%/yr worse). Flags are attention signals: `BREACHED` = option in the money; `challenged` = |delta| ≥ 0.40; `expiry week` = ≤ 7 days left. A breached covered call at/above your cost basis is the wheel's intended profit-taking exit, not a failure.
 """
 
 
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
-                      policy=None, leveraged: bool = False) -> dict:
+                      policy=None, leveraged: bool = False,
+                      valuation=None, val_cfg=None) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -101,6 +112,27 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
     action = policy.decide(PositionState.CASH, q, row)
     out["policy_action"] = action.name
+    regime = None
+    if valuation is not None:
+        regime = wheel_regime(out["spot"], valuation.wheel_fv)
+        out["valuation"] = {
+            "wheel_fv": round(valuation.wheel_fv, 2),
+            "regime": regime.name if regime is not None else None,
+            "reliability_tier": valuation.reliability_tier,
+            "put_ceiling": round(put_ceiling(valuation, out["spot"],
+                                             val_cfg), 2),
+            "as_of": valuation.date,
+        }
+        gated = clamp_action(action, regime)
+        if gated != action:
+            out["policy_action_raw"] = action.name
+            out["policy_action"] = gated.name
+            action = gated
+            if action == CashAction.WAIT:
+                out["action"] = "WAIT"
+                out["reason"] = (f"valuation gate: regime {regime.name} "
+                                 "blocks new puts")
+                return out
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
@@ -108,17 +140,27 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     vol = float(row["vol_proxy"])
     chain = ps.chain(date, out["spot"], vol, "P")
     quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
-                                     cfg=SelectorConfig())
-    risk = validate_open(quote, 1, cash, 0, cash, 0.0, False, RiskConfig.single_ticker())
+                                     cfg=SelectorConfig(),
+                                     valuation=valuation, val_cfg=val_cfg)
+    risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
+                         RiskConfig.single_ticker(),
+                         valuation=valuation, spot=out["spot"],
+                         val_cfg=val_cfg)
     if quote is None:
         out["action"] = "WAIT"
-        out["reason"] = "tier unimplementable in current chain window"
+        out["reason"] = ("no strike clears the valuation ceiling in the "
+                         "chain window" if valuation is not None else
+                         "tier unimplementable in current chain window")
         return out
     if not risk.passed:
         out["action"] = "WAIT"
         out["reason"] = f"risk engine: {risk.flags}"
         return out
     out["action"] = "SELL_PUT"
+    if valuation is not None:
+        out["valuation"]["premium_required"] = round(
+            premium_required(quote.strike,
+                             put_ceiling(valuation, out["spot"], val_cfg)), 2)
     out["contract"] = {
         "type": "PUT", "strike": quote.strike,
         "expiration": str(quote.expiration.date()), "dte": quote.dte,
@@ -129,7 +171,8 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     return out
 
 
-def guide_position(pos: dict, frame: pd.DataFrame, ps) -> dict:
+def guide_position(pos: dict, frame: pd.DataFrame, ps,
+                   valuation=None, val_cfg=None) -> dict:
     row = frame.iloc[-1]
     date = frame.index[-1]
     spot = float(row["close"])
@@ -147,6 +190,19 @@ def guide_position(pos: dict, frame: pd.DataFrame, ps) -> dict:
         flags.append(f"delta {abs(delta):.2f} >= 0.40 (challenged)")
     if dte <= 7:
         flags.append("expiry week")
+    if valuation is not None:
+        prem0 = float(pos.get("premium_fill", 0) or 0)
+        if cp == "P":
+            ceil = put_ceiling(valuation, spot, val_cfg)
+            if pos["strike"] - prem0 > ceil + 1e-9:
+                flags.append(f"net basis {pos['strike'] - prem0:.2f} above "
+                             f"acquisition ceiling {ceil:.2f}")
+        else:
+            floor = exit_floor(valuation, None, val_cfg)
+            if pos["strike"] + prem0 < floor - 1e-9:
+                flags.append(f"effective exit {pos['strike'] + prem0:.2f} "
+                             f"below fundamental exit floor {floor:.2f} "
+                             "(selling upside too cheaply)")
     pc = premium_captured(mark, float(pos.get("premium_fill", 0) or 0))
     return {
         "ticker": pos["ticker"], "type": pos["type"].upper(),
@@ -215,15 +271,21 @@ def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
     for w in warnings:
         lines.append(f"> ⚠️ {w}")
     lines += ["", "## Opening recommendations (cash sleeve)", "",
-              "| Ticker | State | Action | Strike | DTE | Δ | Model prem |",
-              "|---|---|---|---|---|---|---|"]
+              f"_{VAL_GATE_NOTE}_", "",
+              "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
+              "| Wheel FV | Regime | Ceiling | Prem req |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
         c = r.get("contract") or {}
+        v = r.get("valuation") or {}
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
         lines.append(f"| {name} | {state} | {r['action']} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
-                     f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} |")
+                     f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
+                     f"| {v.get('wheel_fv', '—')} | {v.get('regime', '—')} "
+                     f"| {v.get('put_ceiling', '—')} "
+                     f"| {v.get('premium_required', '—')} |")
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
@@ -277,6 +339,12 @@ def main(argv=None):
             if not args.market_volcomp:
                 from rlbot.features.ticker_iv import build_all as build_tiv
                 build_tiv(cfg)
+    from rlbot.data.fv_ensemble import load_wheel_valuations
+    valuations, val_warns = load_wheel_valuations(cfg)
+    warnings.extend(val_warns)
+    if valuations:
+        warnings.append(f"valuation gates active for {len(valuations)} "
+                        "tickers (SPEC-009)")
     gate = require_gate(cfg)
     synth = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
 
@@ -310,7 +378,9 @@ def main(argv=None):
         lev = cfg.is_leveraged(t)
         policy = LeveragedETFPolicy() if lev else AdaptiveRulePolicy()
         recs.append(recommend_opening(t, frame, ps_for(t, frame.index[-1]),
-                                      args.cash, policy=policy, leveraged=lev))
+                                      args.cash, policy=policy, leveraged=lev,
+                                      valuation=valuations.get(t),
+                                      val_cfg=cfg.val_gates))
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
@@ -331,7 +401,10 @@ def main(argv=None):
         tkr = str(p["ticker"]).upper()
         if tkr in cfg.assistant_universe:
             frame_t = store.frame(tkr)
-            guides.append(guide_position(p, frame_t, ps_for(tkr, frame_t.index[-1])))
+            guides.append(guide_position(p, frame_t,
+                                         ps_for(tkr, frame_t.index[-1]),
+                                         valuation=valuations.get(tkr),
+                                         val_cfg=cfg.val_gates))
         else:
             warnings.append(f"position ticker {tkr} not in universe; skipped")
 
