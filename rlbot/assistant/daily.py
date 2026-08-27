@@ -54,6 +54,12 @@ LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "exposure; model premiums are least reliable on these names "
                   "(vol clustering) — consider reduced contract size.")
 
+CANDIDATE_NOTE = ("Candidates come from the momentum monitor's weekly top "
+                  "decile (pure 120-day momentum, SPEC-010). Capped at "
+                  "CONSERVATIVE, max 2 open positions, valuation gates apply, "
+                  "and they are NOT part of the gate-validated universe — "
+                  "promote to Core only after your own suitability review.")
+
 LEGEND = """## Legend
 
 **State column** = `market regime / valuation / vol-compensation` — the three inputs the rule policy conditions on.
@@ -265,7 +271,8 @@ def decision_record(rec: dict, cash: float, run_id: str, seq: int) -> dict | Non
     }
 
 
-def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
+def render_brief(date: str, recs: list, guides: list, warnings: list,
+                 cand_recs: list | None = None) -> str:
     lines = [f"# Wheel Daily Brief — {date}", "",
              f"_{MODEL_NOTE}_", ""]
     for w in warnings:
@@ -288,6 +295,25 @@ def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
                      f"| {v.get('premium_required', '—')} |")
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
+    if cand_recs:
+        lines += ["", "## Candidates (momentum monitor)", "",
+                  f"_{CANDIDATE_NOTE}_", "",
+                  "| Ticker | Mom pct | 4w chg | State | Action | Strike | DTE "
+                  "| Δ | Model prem | Wheel FV | Regime | Ceiling |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for r in cand_recs:
+            state = "/".join(r.get("state_names", ["—"]))
+            c = r.get("contract") or {}
+            v = r.get("valuation") or {}
+            chg = r.get("rank_change_4w")
+            lines.append(
+                f"| {r['ticker']} | {r.get('momentum_pct', '—')} "
+                f"| {'+' if (chg or 0) > 0 else ''}{chg if chg is not None else '—'} "
+                f"| {state} | {r['action']} | {c.get('strike', '—')} "
+                f"| {c.get('dte', '—')} | {c.get('delta', '—')} "
+                f"| {c.get('model_premium', '—')} | {v.get('wheel_fv', '—')} "
+                f"| {v.get('regime', '—')} | {v.get('put_ceiling', '—')} |")
+
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
     if guides:
         lines += ["| Ticker | Type | Strike | DTE | Δ now | Prem captured | Guidance | Flags |",
@@ -321,6 +347,11 @@ def main(argv=None):
         vol_comp_source="market" if args.market_volcomp else "ticker_iv",
     )
     warnings = []
+    from rlbot.data.candidates import latest_candidates
+    candidates, cand_warn = latest_candidates(exclude=set(cfg.assistant_universe))
+    if cand_warn:
+        warnings.append(cand_warn)
+    cand_tickers = [c.ticker for c in candidates]
     if args.download:
         from rlbot.data.build import build_all
         build_all(RlbotConfig(), download=True)
@@ -330,6 +361,26 @@ def main(argv=None):
             refresh_valuation(cfg)
         except Exception as e:
             warnings.append(f"FV snapshot skipped: {e}")
+        for ct in cand_tickers:                    # SPEC-010: onboard bars
+            from rlbot.data import sources as _src
+            try:
+                _src.load_bars(ct, cfg.data.bars_path)
+            except Exception:
+                try:
+                    _src.download_bars([ct], cfg.data.bars_path,
+                                       years=cfg.data.ticker_years)
+                except Exception as e:
+                    warnings.append(f"candidate {ct}: bars unavailable ({e})")
+        try:                                       # refresh ensemble incl. candidates
+            import subprocess, sys as _sys
+            from rlbot.data.fv_ensemble import _FNAME_RE  # noqa: F401
+            fv_repo = Path(cfg.data.fv_ensemble_dir).parent
+            if (fv_repo / "run_fv.py").exists():
+                subprocess.run([_sys.executable, "run_fv.py", "--tickers",
+                                ",".join(cfg.assistant_universe + cand_tickers)],
+                               cwd=fv_repo, capture_output=True, timeout=1200)
+        except Exception as e:
+            warnings.append(f"ensemble refresh skipped: {e}")
         if not args.no_real_quotes:
             from rlbot.data.daily_chain_update import update_daily_chains
             chain_status = update_daily_chains(cfg)
@@ -381,6 +432,42 @@ def main(argv=None):
                                       args.cash, policy=policy, leveraged=lev,
                                       valuation=valuations.get(t),
                                       val_cfg=cfg.val_gates))
+    cand_recs = []
+    for cand in candidates:
+        try:
+            from rlbot.data import sources as _src
+            from rlbot.data.candidates import cap_candidate_action
+            from rlbot.features.technicals_series import build_feature_frame
+            from rlbot.state.encoder import build_ticker_frame
+            bars = _src.load_bars(cand.ticker, cfg.data.bars_path)
+            mini = build_feature_frame(
+                bars, rv_window=cfg.data.realized_vol_ticker_window)
+            mini.index = mini.index.tz_localize(None) \
+                if mini.index.tz is not None else mini.index
+            mini.insert(0, "ticker", cand.ticker)
+            frame_c = build_ticker_frame(
+                cand.ticker, mini, store.tables["market"],
+                store.tables["valuation"], cfg)
+        except Exception as e:
+            warnings.append(f"candidate {cand.ticker}: skipped ({e})")
+            continue
+
+        class _CappedB3:
+            def decide(self, pos, q, row_):
+                return cap_candidate_action(
+                    AdaptiveRulePolicy().decide(pos, q, row_))
+
+        rec = recommend_opening(cand.ticker, frame_c,
+                                ps_for(cand.ticker, frame_c.index[-1]),
+                                args.cash, policy=_CappedB3(),
+                                valuation=valuations.get(cand.ticker),
+                                val_cfg=cfg.val_gates)
+        rec["candidate"] = True
+        rec["momentum_pct"] = round(cand.percentile, 3)
+        rec["rank_change_4w"] = round(cand.rank_change_4w, 3) \
+            if cand.rank_change_4w is not None else None
+        cand_recs.append(rec)
+
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
@@ -412,10 +499,11 @@ def main(argv=None):
     live = cfg.data.base_path / "live"
     live.mkdir(parents=True, exist_ok=True)
     payload = {"date": date, "iv_uplift": gate["iv_uplift"],
-               "openings": recs, "positions": guides, "warnings": warnings,
+               "openings": recs, "candidates": cand_recs,
+               "positions": guides, "warnings": warnings,
                "notes": [MODEL_NOTE, MGMT_NOTE, LEVERAGED_NOTE]}
     (live / f"recommendations_{date}.json").write_text(json.dumps(payload, indent=2))
-    brief = render_brief(date, recs, guides, warnings)
+    brief = render_brief(date, recs, guides, warnings, cand_recs)
     (live / f"brief_{date}.md").write_text(brief)
 
     run_id = f"live-{date}"
