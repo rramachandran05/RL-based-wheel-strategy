@@ -27,16 +27,25 @@ class DataUnavailable(RuntimeError):
 
 
 def download_bars(tickers: list, dest: Path, years: int) -> dict:
-    """Tiingo daily-adjusted OHLCV → CSV cache. Returns {ticker: DataFrame}."""
-    api_key = get_key("TIINGO_API_KEY")
-    if not api_key:
-        raise DataUnavailable("TIINGO_API_KEY not found in env or .env files")
+    """Daily-adjusted OHLCV → CSV cache. Alpha Vantage premium is primary
+    (2026-08-30; one call also refreshes bars_unadj/); Tiingo is the
+    fallback. Returns {ticker: DataFrame}."""
     dest.mkdir(parents=True, exist_ok=True)
+    tiingo_key = get_key("TIINGO_API_KEY")
     out = {}
     for ticker in tickers:
-        df = download_stock_data(ticker, api_key, str(dest), years=years)
+        try:
+            from rlbot.data.av_bars import download_stock_data_av
+            out[ticker] = download_stock_data_av(
+                ticker, dest, dest.parent / "bars_unadj", years)
+            continue
+        except DataUnavailable as e:
+            print(f"  {ticker}: AV bars failed ({e}); trying Tiingo")
+        if not tiingo_key:
+            raise DataUnavailable(f"no bar source succeeded for {ticker}")
+        df = download_stock_data(ticker, tiingo_key, str(dest), years=years)
         if df is None:
-            raise DataUnavailable(f"Tiingo download failed for {ticker}")
+            raise DataUnavailable(f"all bar sources failed for {ticker}")
         out[ticker] = df
     return out
 

@@ -26,6 +26,19 @@ from rlbot.data.sources import DataUnavailable
 
 def fetch_unadjusted(ticker: str, dest: Path, years: int = 15,
                      timeout: int = 30) -> pd.DataFrame:
+    """AV premium primary (2026-08-30): one daily-adjusted call refreshes both
+    caches; falls through to the original Tiingo implementation on failure."""
+    try:
+        from rlbot.data.av_bars import download_stock_data_av
+        download_stock_data_av(ticker, dest.parent / "bars", dest, years)
+        return load_unadjusted(ticker, dest)
+    except DataUnavailable:
+        pass
+    return _fetch_unadjusted_tiingo(ticker, dest, years, timeout)
+
+
+def _fetch_unadjusted_tiingo(ticker: str, dest: Path, years: int = 15,
+                             timeout: int = 30) -> pd.DataFrame:
     api_key = get_key("TIINGO_API_KEY")
     if not api_key:
         raise DataUnavailable("TIINGO_API_KEY not found")
