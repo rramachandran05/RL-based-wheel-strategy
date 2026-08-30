@@ -118,9 +118,19 @@ def build_all(cfg: RlbotConfig, download: bool = False) -> dict:
     data = cfg.data
     universe = cfg.assistant_universe
     if download:
-        sources.download_bars([cfg.market_ticker], data.bars_path, years=data.spy_years)
-        sources.download_bars(universe, data.bars_path, years=data.ticker_years)
-        sources.fetch_vix_fred(data.external_path / "vixcls.csv")
+        # Degrade to cached bars on download failure (e.g. Tiingo 429 after
+        # repeated same-day full pulls) — a stale brief beats no brief.
+        try:
+            sources.download_bars([cfg.market_ticker], data.bars_path,
+                                  years=data.spy_years)
+            sources.download_bars(universe, data.bars_path,
+                                  years=data.ticker_years)
+        except sources.DataUnavailable as e:
+            print(f"  bar refresh failed ({e}); using cached bars")
+        try:
+            sources.fetch_vix_fred(data.external_path / "vixcls.csv")
+        except sources.DataUnavailable as e:
+            print(f"  VIX refresh failed ({e}); using cached series")
 
     spy_df = sources.load_bars(cfg.market_ticker, data.bars_path)
     vix = sources.load_vix(data.external_path)

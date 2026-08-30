@@ -36,7 +36,8 @@ def _db_path() -> Path:
 
 
 def latest_candidates(exclude: set | None = None, top_n: int = CANDIDATE_TOP_N,
-                      db_path: Path | None = None) -> tuple:
+                      db_path: Path | None = None,
+                      spy_only: bool = True) -> tuple:
     """(candidates, warning|None). Graceful empty on any failure (REQ-9.5)."""
     path = db_path or _db_path()
     if not path.exists():
@@ -51,10 +52,19 @@ def latest_candidates(exclude: set | None = None, top_n: int = CANDIDATE_TOP_N,
         latest = dates[-1]
         prior = next((d for d in reversed(dates)
                       if (pd.Timestamp(latest) - pd.Timestamp(d)).days >= 26), None)
+        spy = set()
+        if spy_only:
+            try:
+                spy = {r[0] for r in conn.execute(
+                    "SELECT symbol FROM monitor_spy_holdings")}
+            except Exception:
+                spy = set()          # table absent -> filter no-ops
         cur = pd.read_sql_query(
             "SELECT symbol, percentile, r120 FROM monitor_rankings "
             "WHERE run_date = ? AND in_top_decile = 1 "
             "ORDER BY percentile DESC", conn, params=(latest,))
+        if spy:
+            cur = cur[cur["symbol"].isin(spy)]
         old = {}
         if prior:
             old = dict(conn.execute(

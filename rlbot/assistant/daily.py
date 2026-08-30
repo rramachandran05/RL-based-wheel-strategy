@@ -328,6 +328,39 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
     return "\n".join(lines) + "\n"
 
 
+def sync_universe_from_sheet(cfg, positions_path: Path) -> tuple:
+    """SPEC-010 fix (2026-08-29): the FV sheet tab is the live core list.
+    Adds sheet tickers missing from the universe (via cfg.watch_extra) and
+    returns (skip_set, notes): config stocks no longer on the sheet — and
+    with no open position — are skipped from the brief. Sheet unreachable
+    -> no changes (config fallback)."""
+    from rlbot.data.fv_snapshot import FV_GID, FV_SHEET_ID, parse_fv_rows
+    from rlbot.vendor.sheet_data import fetch_sheet_rows
+    notes = []
+    try:
+        raw = fetch_sheet_rows(FV_SHEET_ID, FV_GID)
+        sheet = set(parse_fv_rows(raw)) if raw else set()
+    except Exception:
+        sheet = set()
+    if not sheet:
+        return set(), ["FV sheet unreachable: universe from config fallback"]
+    held = set()
+    try:
+        rows, _ = load_positions(positions_path)
+        held = {str(r["ticker"]).upper() for r in rows}
+    except Exception:
+        pass
+    added = sorted(sheet - set(cfg.assistant_universe))
+    if added:
+        cfg.watch_extra = list(cfg.watch_extra) + added
+        notes.append(f"universe synced from FV sheet: added {added}")
+    skip = {t for t in cfg.tickers
+            if t not in sheet and t not in held}
+    if skip:
+        notes.append(f"not on FV sheet, no position — skipped: {sorted(skip)}")
+    return skip, notes
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--download", action="store_true")
@@ -347,6 +380,9 @@ def main(argv=None):
         vol_comp_source="market" if args.market_volcomp else "ticker_iv",
     )
     warnings = []
+    skip_core, uni_notes = sync_universe_from_sheet(
+        cfg, args.positions or cfg.data.base_path / "positions.csv")
+    warnings.extend(uni_notes)
     from rlbot.data.candidates import latest_candidates
     candidates, cand_warn = latest_candidates(exclude=set(cfg.assistant_universe))
     if cand_warn:
@@ -354,14 +390,15 @@ def main(argv=None):
     cand_tickers = [c.ticker for c in candidates]
     if args.download:
         from rlbot.data.build import build_all
-        build_all(RlbotConfig(), download=True)
+        build_all(cfg, download=True)  # cfg carries the sheet-synced universe
         try:                                  # FV snapshot (ported from sibling)
             from rlbot.data.fv_snapshot import refresh_valuation, snapshot_fair_value
             snapshot_fair_value(cfg)
             refresh_valuation(cfg)
         except Exception as e:
             warnings.append(f"FV snapshot skipped: {e}")
-        for ct in cand_tickers:                    # SPEC-010: onboard bars
+        for ct in cand_tickers + [t for t in cfg.assistant_universe
+                                  if t not in skip_core]:  # onboard new names too
             from rlbot.data import sources as _src
             try:
                 _src.load_bars(ct, cfg.data.bars_path)
@@ -417,6 +454,8 @@ def main(argv=None):
     recs, guides = [], []
     latest = None
     for t in cfg.assistant_universe:
+        if t in skip_core:
+            continue
         try:
             frame = store.frame(t)
         except Exception:

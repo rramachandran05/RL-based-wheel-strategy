@@ -41,7 +41,7 @@ def parse_fv_rows(raw_rows: list) -> dict:
     out = {}
     for row in rows_to_dicts(raw_rows, FV_HEADER_ROW):
         t = normalize_ticker(row.get("Stock", ""))
-        if not t or t == "STOCK" or not _TICKER_RE.match(t):
+        if not t or t in ("STOCK", "ETFS") or not _TICKER_RE.match(t):
             continue
         out[t] = {
             "tipranks": parse_dollar(row.get("TipRanks (mean)", "")),
