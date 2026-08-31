@@ -20,8 +20,9 @@ from rlbot.learning.trajectories import validate_record
 from rlbot.options.premium_source import SyntheticBSPremiumSource
 from rlbot.options.selector import SelectorConfig, select_contract
 from rlbot.risk.engine import RiskConfig, validate_open
-from rlbot.risk.valuation import (clamp_action, exit_floor, premium_required,
-                                  put_ceiling, wheel_regime)
+from rlbot.risk.mcb_gates import (mcb_ceiling, net_basis_flag,
+                                  premium_required, reachability_advice,
+                                  required_tier, tradeable)
 from rlbot.simulator.portfolio import ExecutionConfig
 from rlbot.state.encoder import encode_q_state
 from rlbot.state.enums import CashAction, PositionState, legal_actions
@@ -43,12 +44,13 @@ MODEL_NOTE = ("Quotes marked historical_chain are REAL previous-close chain "
               "mids/deltas (AV); synthetic_bs rows are model values. Either "
               "way, confirm against your broker's live quote before acting. "
               "Recommendations only - not investment advice.")
-VAL_GATE_NOTE = ("Valuation gates (SPEC-009) use the fair-value-discount "
-                 "ensemble's Wheel FV: puts must land a net basis "
-                 "(strike - premium) at/below the acquisition ceiling and "
-                 "are masked by regime (no puts on VERY_EXPENSIVE names); "
-                 "'Prem req' is the minimum LIVE premium that makes the "
-                 "strike acceptable - check it against your broker quote.")
+VAL_GATE_NOTE = ("Valuation gates use mcb-wheel's Maximum Comfortable Basis "
+                 "report (replacing the Wheel-FV feed, 2026-08-30): every put "
+                 "must land a net basis (strike - premium) at/below the MCB "
+                 "ceiling of the required tier — the DEEPER of the report's "
+                 "guardrail tier and our market-regime posture. 'Prem req' is "
+                 "the minimum LIVE premium that makes the strike acceptable - "
+                 "check it against your broker quote.")
 LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "WAIT in any stress regime). Assignment means 3x market "
                   "exposure; model premiums are least reliable on these names "
@@ -56,7 +58,8 @@ LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
 
 CANDIDATE_NOTE = ("Candidates come from the momentum monitor's weekly top "
                   "decile (pure 120-day momentum, SPEC-010). Capped at "
-                  "CONSERVATIVE, max 2 open positions, valuation gates apply, "
+                  "CONSERVATIVE, max 2 open positions, MCB gates apply only "
+                  "where the sheet covers the name, "
                   "and they are NOT part of the gate-validated universe — "
                   "promote to Core only after your own suitability review.")
 
@@ -95,7 +98,7 @@ LEGEND = """## Legend
 
 The Δ column is the selected contract's actual delta (≈ assignment probability); DTE targets 25–45 days. Leveraged ETFs (3x) cap at BALANCED and always WAIT in stress.
 
-**Valuation gates (SPEC-009).** Wheel FV comes from the fair-value-discount ensemble (reliability-weighted intrinsic + haircut analyst target). Regime = spot/Wheel FV: <0.80 DEEP_UNDERVALUED, <0.95 UNDERVALUED, ≤1.05 FAIR_VALUED, ≤1.20 EXPENSIVE, >1.20 VERY_EXPENSIVE. Puts are masked by regime (VERY_EXPENSIVE → no puts; EXPENSIVE caps at CONSERVATIVE) and every candidate must land `strike − premium ≤ Ceiling = min(FV·(1−MOS), spot·0.95)`. `Prem req` = the minimum live premium making the shown strike acceptable. Open CSPs/CCs are flagged when their filled net basis / effective exit violates the boundary. Calls on DEEP_UNDERVALUED names are capped at DEFENSIVE (don't sell away large fundamental upside for a few dollars of premium). Stale or missing valuation data disables all of this (warning shown).
+**MCB gates (mcb-wheel, replaces the Wheel-FV feed).** MCB = the highest net cost basis (strike − premium) still comfortable to own, published per ticker in three descending zones FAIR > ATTRACTIVE > EXCELLENT. The HARD rule: `strike − premium ≤ MCB(required tier)`, where the required tier is the *deeper* of (a) the report's guardrail-resolved `min_eligible_tier` (behavioral guardrail NORMAL→FAIR, CAUTION→ATTRACTIVE, SEVERE→EXCELLENT) and (b) our market-regime posture (BULL_LOW_VOL→FAIR; any other regime→at least ATTRACTIVE). `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability is advisory: `UNREACHABLE` skips the strike scan (the FAIR basis sits below a bear-correction price); `PATIENCE` allows only elevated-IV setups (vol-comp ATTRACTIVE). Open CSPs are flagged when their filled net basis exceeds the ceiling; the call side is governed by your cost basis (calls never sold below basis), since MCB is an acquisition-side construct. A report older than 5 trading sessions is expired and disables all of this (warning shown).
 
 **Position guidance.** HOLD to expiration is the validated default (rolling on margin-of-safety triggers tested 1.2–2.3%/yr worse). Flags are attention signals: `BREACHED` = option in the money; `challenged` = |delta| ≥ 0.40; `expiry week` = ≤ 7 days left. A breached covered call at/above your cost basis is the wheel's intended profit-taking exit, not a failure.
 """
@@ -103,8 +106,7 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
-                      valuation=None, val_cfg=None,
-                      book=None, rcfg=None) -> dict:
+                      mcb=None, book=None, rcfg=None) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -119,36 +121,37 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
     action = policy.decide(PositionState.CASH, q, row)
     out["policy_action"] = action.name
-    regime = None
-    if valuation is not None:
-        regime = wheel_regime(out["spot"], valuation.wheel_fv)
-        out["valuation"] = {
-            "wheel_fv": round(valuation.wheel_fv, 2),
-            "regime": regime.name if regime is not None else None,
-            "reliability_tier": valuation.reliability_tier,
-            "put_ceiling": round(put_ceiling(valuation, out["spot"],
-                                             val_cfg), 2),
-            "as_of": valuation.date,
+    ceiling = None
+    if mcb is not None:
+        tier = required_tier(mcb, q[0])
+        ceiling = mcb_ceiling(mcb, q[0])
+        out["mcb"] = {
+            "tier": tier,
+            "ceiling": round(ceiling, 2) if ceiling is not None else None,
+            "guardrail": mcb.guardrail,
+            "layer_a": mcb.layer_a,
+            "reachability": mcb.reachability,
+            "as_of": mcb.date,
         }
-        gated = clamp_action(action, regime)
-        if gated != action:
-            out["policy_action_raw"] = action.name
-            out["policy_action"] = gated.name
-            action = gated
-            if action == CashAction.WAIT:
-                out["action"] = "WAIT"
-                out["reason"] = (f"valuation gate: regime {regime.name} "
-                                 "blocks new puts")
-                return out
+        ok, why = tradeable(mcb)
+        if not ok:
+            out["action"] = "WAIT"
+            out["reason"] = why
+            return out
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
+        return out
+    advice = reachability_advice(mcb, q[2])
+    if advice is not None:
+        out["action"] = "WAIT"
+        out["reason"] = advice
         return out
     vol = float(row["vol_proxy"])
     chain = ps.chain(date, out["spot"], vol, "P")
     quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
                                      cfg=SelectorConfig(),
-                                     valuation=valuation, val_cfg=val_cfg)
+                                     net_basis_ceiling=ceiling)
     # Book-level enforcement (2026-08-30): with a book, the whole
     # position set feeds RISK-4/5/8 and the estimated-earnings blackout.
     if book is not None and quote is not None and rcfg is not None:
@@ -158,30 +161,31 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             open_put_escrow=book.put_escrow,
             event_in_window=earnings_in_window(ticker, quote.expiration, rcfg),
             cfg=RiskConfig(),                      # portfolio-mode caps
-            valuation=valuation, spot=out["spot"], val_cfg=val_cfg,
             n_open_positions=book.n_open_positions,
             n_same_expiry_week=book.same_week_count(quote.expiration),
         )
     else:
         risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
-                             RiskConfig.single_ticker(),
-                             valuation=valuation, spot=out["spot"],
-                             val_cfg=val_cfg)
+                             RiskConfig.single_ticker())
     if quote is None:
         out["action"] = "WAIT"
-        out["reason"] = ("no strike clears the valuation ceiling in the "
-                         "chain window" if valuation is not None else
+        out["reason"] = ("no strike clears the MCB net-basis ceiling in the "
+                         "chain window" if ceiling is not None else
                          "tier unimplementable in current chain window")
+        return out
+    mcb_viol = net_basis_flag(quote.strike, quote.mid, ceiling)
+    if mcb_viol is not None:               # belt-and-suspenders: selector
+        out["action"] = "WAIT"             # already pre-filtered on this
+        out["reason"] = f"MCB gate: {mcb_viol}"
         return out
     if not risk.passed:
         out["action"] = "WAIT"
         out["reason"] = f"risk engine: {risk.flags}"
         return out
     out["action"] = "SELL_PUT"
-    if valuation is not None:
-        out["valuation"]["premium_required"] = round(
-            premium_required(quote.strike,
-                             put_ceiling(valuation, out["spot"], val_cfg)), 2)
+    if ceiling is not None:
+        out["mcb"]["premium_required"] = round(
+            premium_required(quote.strike, ceiling), 2)
     out["contract"] = {
         "type": "PUT", "strike": quote.strike,
         "expiration": str(quote.expiration.date()), "dte": quote.dte,
@@ -193,7 +197,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
 
 
 def guide_position(pos: dict, frame: pd.DataFrame, ps,
-                   valuation=None, val_cfg=None) -> dict:
+                   mcb=None, market_regime: int | None = None) -> dict:
     row = frame.iloc[-1]
     date = frame.index[-1]
     spot = float(row["close"])
@@ -211,19 +215,20 @@ def guide_position(pos: dict, frame: pd.DataFrame, ps,
         flags.append(f"delta {abs(delta):.2f} >= 0.40 (challenged)")
     if dte <= 7:
         flags.append("expiry week")
-    if valuation is not None:
+    # MCB is an acquisition-side construct: flag open CSPs whose filled net
+    # basis sits above the required-tier ceiling. The call side has no MCB
+    # analogue — cost-basis discipline (calls never below basis) governs it.
+    if mcb is not None and cp == "P":
         prem0 = float(pos.get("premium_fill", 0) or 0)
-        if cp == "P":
-            ceil = put_ceiling(valuation, spot, val_cfg)
-            if pos["strike"] - prem0 > ceil + 1e-9:
-                flags.append(f"net basis {pos['strike'] - prem0:.2f} above "
-                             f"acquisition ceiling {ceil:.2f}")
-        else:
-            floor = exit_floor(valuation, None, val_cfg)
-            if pos["strike"] + prem0 < floor - 1e-9:
-                flags.append(f"effective exit {pos['strike'] + prem0:.2f} "
-                             f"below fundamental exit floor {floor:.2f} "
-                             "(selling upside too cheaply)")
+        regime = market_regime if market_regime is not None \
+            else int(frame.iloc[-1]["market_regime"])
+        ceil = mcb_ceiling(mcb, regime)
+        if ceil is not None and pos["strike"] - prem0 > ceil + 1e-9:
+            flags.append(
+                f"net basis {pos['strike'] - prem0:.2f} above MCB "
+                f"{required_tier(mcb, regime)} ceiling {ceil:.2f}")
+        if mcb.layer_a in ("MONITOR_ONLY", "HALT"):
+            flags.append(f"MCB layer A now {mcb.layer_a} — no new exposure")
     pc = premium_captured(mark, float(pos.get("premium_fill", 0) or 0))
     return {
         "ticker": pos["ticker"], "type": pos["type"].upper(),
@@ -286,6 +291,18 @@ def decision_record(rec: dict, cash: float, run_id: str, seq: int) -> dict | Non
     }
 
 
+def _mcb_flags(v: dict) -> str:
+    """Compact guardrail/reachability/layer-A cell for the brief tables."""
+    bits = []
+    if v.get("guardrail") and v["guardrail"] != "NORMAL":
+        bits.append(v["guardrail"])
+    if v.get("reachability") and v["reachability"] != "NORMAL":
+        bits.append(v["reachability"])
+    if v.get("layer_a") and v["layer_a"] != "OWN":
+        bits.append(v["layer_a"])
+    return ", ".join(bits) if bits else ("—" if not v else "ok")
+
+
 def render_brief(date: str, recs: list, guides: list, warnings: list,
                  cand_recs: list | None = None) -> str:
     lines = [f"# Wheel Daily Brief — {date}", "",
@@ -295,39 +312,39 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
     lines += ["", "## Opening recommendations (cash sleeve)", "",
               f"_{VAL_GATE_NOTE}_", "",
               "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
-              "| Wheel FV | Regime | Ceiling | Prem req |",
+              "| MCB tier | Ceiling | Prem req | MCB flags |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
         c = r.get("contract") or {}
-        v = r.get("valuation") or {}
+        v = r.get("mcb") or {}
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
         lines.append(f"| {name} | {state} | {r['action']} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
                      f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
-                     f"| {v.get('wheel_fv', '—')} | {v.get('regime', '—')} "
-                     f"| {v.get('put_ceiling', '—')} "
-                     f"| {v.get('premium_required', '—')} |")
+                     f"| {v.get('tier', '—')} | {v.get('ceiling', '—')} "
+                     f"| {v.get('premium_required', '—')} "
+                     f"| {_mcb_flags(v)} |")
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
     if cand_recs:
         lines += ["", "## Candidates (momentum monitor)", "",
                   f"_{CANDIDATE_NOTE}_", "",
                   "| Ticker | Mom pct | 4w chg | State | Action | Strike | DTE "
-                  "| Δ | Model prem | Wheel FV | Regime | Ceiling |",
+                  "| Δ | Model prem | MCB tier | Ceiling | MCB flags |",
                   "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in cand_recs:
             state = "/".join(r.get("state_names", ["—"]))
             c = r.get("contract") or {}
-            v = r.get("valuation") or {}
+            v = r.get("mcb") or {}
             chg = r.get("rank_change_4w")
             lines.append(
                 f"| {r['ticker']} | {r.get('momentum_pct', '—')} "
                 f"| {'+' if (chg or 0) > 0 else ''}{chg if chg is not None else '—'} "
                 f"| {state} | {r['action']} | {c.get('strike', '—')} "
                 f"| {c.get('dte', '—')} | {c.get('delta', '—')} "
-                f"| {c.get('model_premium', '—')} | {v.get('wheel_fv', '—')} "
-                f"| {v.get('regime', '—')} | {v.get('put_ceiling', '—')} |")
+                f"| {c.get('model_premium', '—')} | {v.get('tier', '—')} "
+                f"| {v.get('ceiling', '—')} | {_mcb_flags(v)} |")
 
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
     if guides:
@@ -423,16 +440,14 @@ def main(argv=None):
                                        years=cfg.data.ticker_years)
                 except Exception as e:
                     warnings.append(f"candidate {ct}: bars unavailable ({e})")
-        try:                                       # refresh ensemble incl. candidates
+        try:            # refresh the MCB report (sheet-driven universe)
             import subprocess, sys as _sys
-            from rlbot.data.fv_ensemble import _FNAME_RE  # noqa: F401
-            fv_repo = Path(cfg.data.fv_ensemble_dir).parent
-            if (fv_repo / "run_fv.py").exists():
-                subprocess.run([_sys.executable, "run_fv.py", "--tickers",
-                                ",".join(cfg.assistant_universe + cand_tickers)],
-                               cwd=fv_repo, capture_output=True, timeout=1200)
+            mcb_repo = Path(cfg.data.mcb_dir).parent
+            if (mcb_repo / "run_mcb.py").exists():
+                subprocess.run([_sys.executable, "run_mcb.py"],
+                               cwd=mcb_repo, capture_output=True, timeout=1200)
         except Exception as e:
-            warnings.append(f"ensemble refresh skipped: {e}")
+            warnings.append(f"MCB refresh skipped: {e}")
         if not args.no_real_quotes:
             from rlbot.data.daily_chain_update import update_daily_chains
             chain_status = update_daily_chains(cfg)
@@ -442,12 +457,13 @@ def main(argv=None):
             if not args.market_volcomp:
                 from rlbot.features.ticker_iv import build_all as build_tiv
                 build_tiv(cfg)
-    from rlbot.data.fv_ensemble import load_wheel_valuations
-    valuations, val_warns = load_wheel_valuations(cfg)
-    warnings.extend(val_warns)
-    if valuations:
-        warnings.append(f"valuation gates active for {len(valuations)} "
-                        "tickers (SPEC-009)")
+    from rlbot.data.mcb_feed import load_mcb
+    mcb_rows, mcb_warns = load_mcb(cfg)
+    warnings.extend(mcb_warns)
+    if mcb_rows:
+        as_of = next(iter(mcb_rows.values())).date
+        warnings.append(f"MCB gates active for {len(mcb_rows)} tickers "
+                        f"(mcb-wheel report {as_of}; replaces Wheel-FV feed)")
     gate = require_gate(cfg)
     synth = SyntheticBSPremiumSource(iv_uplift=gate["iv_uplift"])
 
@@ -515,8 +531,7 @@ def main(argv=None):
         policy = LeveragedETFPolicy() if lev else AdaptiveRulePolicy()
         recs.append(recommend_opening(t, frame, ps_for(t, frame.index[-1]),
                                       args.cash, policy=policy, leveraged=lev,
-                                      valuation=valuations.get(t),
-                                      val_cfg=cfg.val_gates,
+                                      mcb=mcb_rows.get(t),
                                       book=book, rcfg=cfg))
     cand_recs = []
     for cand in candidates:
@@ -546,8 +561,7 @@ def main(argv=None):
         rec = recommend_opening(cand.ticker, frame_c,
                                 ps_for(cand.ticker, frame_c.index[-1]),
                                 args.cash, policy=_CappedB3(),
-                                valuation=valuations.get(cand.ticker),
-                                val_cfg=cfg.val_gates)
+                                mcb=mcb_rows.get(cand.ticker))
         rec["candidate"] = True
         rec["momentum_pct"] = round(cand.percentile, 3)
         rec["rank_change_4w"] = round(cand.rank_change_4w, 3) \
@@ -564,8 +578,7 @@ def main(argv=None):
             frame_t = store.frame(tkr)
             guides.append(guide_position(p, frame_t,
                                          ps_for(tkr, frame_t.index[-1]),
-                                         valuation=valuations.get(tkr),
-                                         val_cfg=cfg.val_gates))
+                                         mcb=mcb_rows.get(tkr)))
         else:
             warnings.append(f"position ticker {tkr} not in universe; skipped")
 

@@ -110,6 +110,7 @@ def select_contract(
     cfg: SelectorConfig = SelectorConfig(),
     valuation=None,             # WheelValuation or None (SPEC-009 VREQ-5)
     val_cfg=None,
+    net_basis_ceiling: float | None = None,   # MCB hard bound (2026-08-30)
 ):
     """Returns (best_quote_or_None, n_candidates). None => tier unimplementable → WAIT."""
     if isinstance(action, CashAction) and action == CashAction.WAIT:
@@ -135,6 +136,9 @@ def select_contract(
                       if ((q.strike - q.mid <= ceiling + 1e-9)
                           if q.cp == "P"
                           else (q.strike + q.mid >= floor - 1e-9))]
+    if net_basis_ceiling is not None:      # MCB contract rule 1 (puts)
+        candidates = [q for q in candidates
+                      if q.cp != "P" or q.strike - q.mid <= net_basis_ceiling + 1e-9]
     if not candidates:
         return None, 0
 

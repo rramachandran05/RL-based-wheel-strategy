@@ -82,6 +82,11 @@ class DataConfig:
     fv_ensemble_dir: Path = field(
         default_factory=lambda: PROJECT_ROOT.parent / "fair-value-discount" / "fv_outputs"
     )
+    # 2026-08-30: mcb-wheel's Maximum-Comfortable-Basis reports — the live
+    # valuation-gate input, replacing the Wheel-FV feed
+    mcb_dir: Path = field(
+        default_factory=lambda: PROJECT_ROOT.parent / "mcb-wheel" / "outputs"
+    )
 
     @property
     def bars_path(self) -> Path:

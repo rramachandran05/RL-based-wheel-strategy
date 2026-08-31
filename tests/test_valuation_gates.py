@@ -216,56 +216,8 @@ def test_selector_call_exit_floor():
 
 
 # ----------------------------------------------------------------------
-# VAC-6: daily-brief integration
+# VAC-6 (daily-brief integration) moved: the daily assistant is fed by
+# mcb-wheel's MCB report since 2026-08-30 — see tests/test_mcb_gates.py.
+# VAC-1..5 above still cover the retained SPEC-009 modules (valuation.py,
+# engine flags, selector legacy pre-filter) used by gate-history tooling.
 # ----------------------------------------------------------------------
-
-def _fake_frame():
-    idx = pd.DatetimeIndex([DATE])
-    return pd.DataFrame({"close": [100.0], "market_regime": [0],
-                         "valuation_state": [1], "vol_compensation": [1],
-                         "vol_proxy": [VOL]}, index=idx)
-
-
-def test_recommend_opening_valuation_gate_blocks_and_annotates():
-    from rlbot.assistant.daily import recommend_opening
-    # VERY_EXPENSIVE (spot 100 vs FV 70) -> WAIT with a valuation reason
-    rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
-                            valuation=_val(70, 0.15), val_cfg=VCFG)
-    assert rec["action"] == "WAIT" and "valuation gate" in rec["reason"]
-    assert rec["valuation"]["regime"] == "VERY_EXPENSIVE"
-    # FAIR-ish valuation still sells, and reports the required premium
-    rec2 = recommend_opening("T", _fake_frame(), PS, 100_000.0,
-                             valuation=_val(105, 0.05), val_cfg=VCFG)
-    if rec2["action"] == "SELL_PUT":
-        c, v = rec2["contract"], rec2["valuation"]
-        assert v["premium_required"] == pytest.approx(
-            max(0.0, c["strike"] - v["put_ceiling"]), abs=0.01)
-    # no valuation -> classic behavior, no valuation key
-    rec3 = recommend_opening("T", _fake_frame(), PS, 100_000.0)
-    assert "valuation" not in rec3
-
-
-def test_render_brief_includes_gate_columns():
-    from rlbot.assistant.daily import render_brief, recommend_opening
-    rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
-                            valuation=_val(70, 0.15), val_cfg=VCFG)
-    text = render_brief("2026-08-27", [rec], [], [])
-    assert "Wheel FV" in text and "Prem req" in text
-    assert "VERY_EXPENSIVE" in text
-    assert "Valuation gates" in text          # legend section
-
-
-def test_guide_position_boundary_flags():
-    from rlbot.assistant.daily import guide_position
-    pos = {"ticker": "T", "type": "CSP", "strike": 99.0,
-           "expiration": str((DATE + pd.Timedelta(days=20)).date()),
-           "premium_fill": 1.0}
-    g = guide_position(pos, _fake_frame(), PS,
-                       valuation=_val(90, 0.15), val_cfg=VCFG)
-    assert any("acquisition ceiling" in f for f in g["attention_flags"])
-    cc = {"ticker": "T", "type": "CC", "strike": 101.0,
-          "expiration": str((DATE + pd.Timedelta(days=20)).date()),
-          "premium_fill": 1.0}
-    g2 = guide_position(cc, _fake_frame(), PS,
-                        valuation=_val(120, 0.15), val_cfg=VCFG)
-    assert any("exit floor" in f for f in g2["attention_flags"])
