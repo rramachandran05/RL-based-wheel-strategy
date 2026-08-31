@@ -142,11 +142,11 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
         return out
+    # Reachability is informational (user choice 2026-08-31): the strike scan
+    # proceeds and the advisory rides along in the JSON + MCB-flags column.
     advice = reachability_advice(mcb, q[2])
     if advice is not None:
-        out["action"] = "WAIT"
-        out["reason"] = advice
-        return out
+        out["mcb"]["advisory"] = advice
     vol = float(row["vol_proxy"])
     chain = ps.chain(date, out["spot"], vol, "P")
     quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],

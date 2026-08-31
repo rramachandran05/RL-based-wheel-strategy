@@ -172,10 +172,12 @@ def test_recommend_opening_mcb_blocks_and_annotates():
     rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                             mcb=_mcb(layer_a="HALT"))
     assert rec["action"] == "WAIT" and "HALT" in rec["reason"]
-    # UNREACHABLE -> WAIT (advisory strike-scan skip)
+    # UNREACHABLE is informational (2026-08-31): scan proceeds, advisory
+    # recorded — never the WAIT reason
     rec2 = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                              mcb=_mcb(reachability="UNREACHABLE"))
-    assert rec2["action"] == "WAIT" and "UNREACHABLE" in rec2["reason"]
+    assert "UNREACHABLE" in rec2["mcb"]["advisory"]
+    assert "UNREACHABLE" not in rec2.get("reason", "")
     # harsh ceiling -> WAIT with the MCB reason
     rec3 = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                              mcb=_mcb(mcb={"FAIR": 60.0}))
