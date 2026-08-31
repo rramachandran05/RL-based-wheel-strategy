@@ -106,7 +106,8 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
-                      mcb=None, book=None, rcfg=None) -> dict:
+                      mcb=None, book=None, rcfg=None,
+                      risk_cfg=None) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -160,7 +161,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             quote, 1, cash, 0, cash,
             open_put_escrow=book.put_escrow,
             event_in_window=earnings_in_window(ticker, quote.expiration, rcfg),
-            cfg=RiskConfig(),                      # portfolio-mode caps
+            cfg=risk_cfg or RiskConfig(),          # portfolio-mode caps
             n_open_positions=book.n_open_positions,
             n_same_expiry_week=book.same_week_count(quote.expiration),
         )
@@ -406,7 +407,14 @@ def sync_universe_from_sheet(cfg, positions_path: Path) -> tuple:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--download", action="store_true")
-    parser.add_argument("--cash", type=float, default=100_000.0)
+    parser.add_argument("--cash", type=float, default=100_000.0,
+                        help="account NAV the risk ratios are computed against")
+    parser.add_argument("--max-positions", type=int, default=None,
+                        help="RISK-4 book-wide position cap (default: "
+                             "RiskConfig's 9; attention cap, not capital)")
+    parser.add_argument("--max-escrow-pct", type=float, default=None,
+                        help="RISK-8 total put escrow / NAV ceiling "
+                             "(default: RiskConfig's 0.40)")
     parser.add_argument("--positions", type=Path, default=None)
     parser.add_argument("--no-sync-positions", action="store_true",
                         help="skip the Google-Sheet monitor-tab sync")
@@ -509,8 +517,18 @@ def main(argv=None):
         warnings.append(pos_warn)
     from rlbot.risk.book import build_book
     book = build_book(positions)
-    warnings.append(f"book-level risk active: {book.n_open_positions} positions, "
-                    f"${book.put_escrow:,.0f} put escrow")
+    base_risk = RiskConfig()
+    risk_cfg = RiskConfig(
+        max_positions=args.max_positions
+        if args.max_positions is not None else base_risk.max_positions,
+        max_assignment_at_once=args.max_escrow_pct
+        if args.max_escrow_pct is not None else base_risk.max_assignment_at_once,
+    )
+    warnings.append(
+        f"book-level risk active: {book.n_open_positions} positions, "
+        f"${book.put_escrow:,.0f} put escrow (caps: {risk_cfg.max_positions} "
+        f"positions, escrow <= {risk_cfg.max_assignment_at_once:.0%} of "
+        f"${args.cash:,.0f} NAV)")
     # Cash-secured puts imply NAV >= escrow: floor the NAV assumption so
     # RISK-3/8 ratios are at least coherent, and say so loudly — pass
     # --cash <account NAV> for real checks.
@@ -542,7 +560,8 @@ def main(argv=None):
         recs.append(recommend_opening(t, frame, ps_for(t, frame.index[-1]),
                                       args.cash, policy=policy, leveraged=lev,
                                       mcb=mcb_rows.get(t),
-                                      book=book, rcfg=cfg))
+                                      book=book, rcfg=cfg,
+                                      risk_cfg=risk_cfg))
     cand_recs = []
     for cand in candidates:
         try:

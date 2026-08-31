@@ -242,3 +242,21 @@ def test_wait_reason_attribution_is_honest():
                              mcb=_mcb(mcb={"FAIR": 60.0}))
     assert rec2["action"] == "WAIT"
     assert "60.00" in rec2["reason"] and "needs premium" in rec2["reason"]
+
+
+def test_recommend_opening_honors_risk_cfg_override():
+    from rlbot.assistant.daily import recommend_opening
+    from rlbot.config import RlbotConfig
+    from rlbot.risk.book import BookState
+    from rlbot.risk.engine import RiskConfig
+
+    book = BookState(n_open_positions=22, put_escrow=0.0,
+                     expiry_week_counts={})
+    cfg = RlbotConfig()
+    rec = recommend_opening("T", _fake_frame(), PS, 1_000_000.0,
+                            book=book, rcfg=cfg)
+    assert rec["action"] == "WAIT" and "RISK-4" in rec["reason"]
+    rec2 = recommend_opening("T", _fake_frame(), PS, 1_000_000.0,
+                             book=book, rcfg=cfg,
+                             risk_cfg=RiskConfig(max_positions=30))
+    assert "RISK-4" not in rec2.get("reason", "")
