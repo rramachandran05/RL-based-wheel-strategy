@@ -169,9 +169,19 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                              RiskConfig.single_ticker())
     if quote is None:
         out["action"] = "WAIT"
-        out["reason"] = ("no strike clears the MCB net-basis ceiling in the "
-                         "chain window" if ceiling is not None else
-                         "tier unimplementable in current chain window")
+        # Attribute the empty scan honestly: only blame the MCB ceiling if
+        # dropping it would have produced a contract (else it's chain/liquidity).
+        if ceiling is not None:
+            ungated, _ = select_contract(action, chain, out["spot"], vol, q[1],
+                                         cfg=SelectorConfig())
+            if ungated is not None:
+                out["reason"] = (
+                    f"no strike clears the MCB net-basis ceiling {ceiling:.2f} "
+                    f"(best band strike {ungated.strike:g} needs premium >= "
+                    f"{premium_required(ungated.strike, ceiling):.2f}, "
+                    f"model {ungated.mid:.2f})")
+                return out
+        out["reason"] = "tier unimplementable in current chain window"
         return out
     mcb_viol = net_basis_flag(quote.strike, quote.mid, ceiling)
     if mcb_viol is not None:               # belt-and-suspenders: selector

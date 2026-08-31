@@ -224,3 +224,19 @@ def test_guide_position_mcb_flags():
     g3 = guide_position(pos, _fake_frame(), PS,
                         mcb=_mcb(mcb={"FAIR": 99.0}, layer_a="MONITOR_ONLY"))
     assert any("MONITOR_ONLY" in f for f in g3["attention_flags"])
+
+
+def test_wait_reason_attribution_is_honest():
+    """A liquidity-empty chain must not be blamed on the MCB ceiling."""
+    from rlbot.assistant.daily import recommend_opening
+    # ceiling above spot: MCB can never be the binding constraint
+    rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 110.0}))
+    if rec["action"] == "WAIT":
+        assert "MCB" not in rec["reason"]
+    # harsh ceiling on a healthy chain: reason names the ceiling and the
+    # premium a live quote would need
+    rec2 = recommend_opening("T", _fake_frame(), PS, 100_000.0,
+                             mcb=_mcb(mcb={"FAIR": 60.0}))
+    assert rec2["action"] == "WAIT"
+    assert "60.00" in rec2["reason"] and "needs premium" in rec2["reason"]
