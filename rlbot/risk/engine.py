@@ -12,10 +12,14 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class RiskConfig:
-    max_pct_per_underlying: float = 0.15      # RISK-3
-    max_positions: int = 9                     # RISK-4
-    max_new_per_expiry_week: int = 3           # RISK-5
-    max_assignment_at_once: float = 0.40       # RISK-8
+    # Normalized caps (2026-08-31): position COUNTS mislead when sizes vary
+    # 10x (one TQQQ put escrows ~$5K, one META put ~$62K), so every capital
+    # rule reads escrow/NAV. The one remaining count is distinct underlyings
+    # — an attention cap, which genuinely doesn't scale with dollars.
+    max_pct_per_underlying: float = 0.15      # RISK-3: per-ticker escrow/NAV
+    max_underlyings: int = 12                  # RISK-4: distinct tickers
+    max_week_assignment_pct: float = 0.15      # RISK-5: same-expiry-week escrow/NAV
+    max_assignment_at_once: float = 0.40       # RISK-8: total escrow/NAV
     earnings_blackout: bool = True             # RISK-7 (live era only; DATA-GAP-2)
 
     @staticmethod
@@ -23,8 +27,8 @@ class RiskConfig:
         """Episode preset: one underlying uses the whole sleeve by design."""
         return RiskConfig(
             max_pct_per_underlying=1.0,
-            max_positions=1,
-            max_new_per_expiry_week=1,
+            max_underlyings=1,
+            max_week_assignment_pct=1.0,
             max_assignment_at_once=1.0,
         )
 
@@ -49,11 +53,13 @@ def validate_open(
     spot: float | None = None,
     cost_basis: float | None = None,
     val_cfg=None,
-    # Book-level inputs (2026-08-30 review fix): counts across the WHOLE
-    # book, fed by the daily assistant from the synced positions. Defaults
-    # keep single-sleeve simulation callers unchanged.
-    n_open_positions: int = 0,
-    n_same_expiry_week: int = 0,
+    # Book-level inputs (2026-08-30 review fix; normalized to escrow dollars
+    # 2026-08-31), fed by the daily assistant from the synced positions.
+    # Defaults keep single-sleeve simulation callers unchanged.
+    n_underlyings: int = 0,          # distinct tickers already in the book
+    is_new_underlying: bool = True,  # would this trade add a ticker?
+    underlying_escrow: float = 0.0,  # existing CSP escrow on THIS ticker
+    same_week_escrow: float = 0.0,   # existing CSP escrow expiring same week
 ) -> RiskDecision:
     if quote is None:
         return RiskDecision(True)
@@ -75,16 +81,19 @@ def validate_open(
             flags.append("RISK-1:cash_secured")
         if nav > 0 and (open_put_escrow + notional) / nav > cfg.max_assignment_at_once:
             flags.append("RISK-8:assignment_at_once")
+        # RISK-5 is put-side: it bounds how much stock one expiry Friday can
+        # force onto the book (CC assignment is the wheel's intended exit).
+        if nav > 0 and (same_week_escrow + notional) / nav > cfg.max_week_assignment_pct:
+            flags.append("RISK-5:week_assignment_pct")
     else:
         if shares < 100 * contracts:
             flags.append("RISK-2:naked_call")
 
-    if nav > 0 and notional / nav > cfg.max_pct_per_underlying:
+    if nav > 0 and (underlying_escrow + (notional if quote.cp == "P" else 0)) \
+            / nav > cfg.max_pct_per_underlying:
         flags.append("RISK-3:concentration")
-    if n_open_positions + 1 > cfg.max_positions:
-        flags.append("RISK-4:max_positions")
-    if n_same_expiry_week + 1 > cfg.max_new_per_expiry_week:
-        flags.append("RISK-5:expiry_week_clustering")
+    if n_underlyings + (1 if is_new_underlying else 0) > cfg.max_underlyings:
+        flags.append("RISK-4:max_underlyings")
     if cfg.earnings_blackout and event_in_window:
         flags.append("RISK-7:earnings_blackout")
 

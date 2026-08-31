@@ -162,8 +162,10 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             open_put_escrow=book.put_escrow,
             event_in_window=earnings_in_window(ticker, quote.expiration, rcfg),
             cfg=risk_cfg or RiskConfig(),          # portfolio-mode caps
-            n_open_positions=book.n_open_positions,
-            n_same_expiry_week=book.same_week_count(quote.expiration),
+            n_underlyings=book.n_underlyings,
+            is_new_underlying=not book.has(ticker),
+            underlying_escrow=book.escrow_for(ticker),
+            same_week_escrow=book.same_week_escrow(quote.expiration),
         )
     else:
         risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
@@ -409,9 +411,13 @@ def main(argv=None):
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--cash", type=float, default=100_000.0,
                         help="account NAV the risk ratios are computed against")
-    parser.add_argument("--max-positions", type=int, default=None,
-                        help="RISK-4 book-wide position cap (default: "
-                             "RiskConfig's 9; attention cap, not capital)")
+    parser.add_argument("--max-underlyings", type=int, default=None,
+                        help="RISK-4 distinct-ticker cap (default: RiskConfig's "
+                             "12; an attention cap — capital caps are the "
+                             "escrow percentages)")
+    parser.add_argument("--max-week-pct", type=float, default=None,
+                        help="RISK-5 same-expiry-week put escrow / NAV ceiling "
+                             "(default: RiskConfig's 0.15)")
     parser.add_argument("--max-escrow-pct", type=float, default=None,
                         help="RISK-8 total put escrow / NAV ceiling "
                              "(default: RiskConfig's 0.40)")
@@ -519,16 +525,21 @@ def main(argv=None):
     book = build_book(positions)
     base_risk = RiskConfig()
     risk_cfg = RiskConfig(
-        max_positions=args.max_positions
-        if args.max_positions is not None else base_risk.max_positions,
+        max_underlyings=args.max_underlyings
+        if args.max_underlyings is not None else base_risk.max_underlyings,
+        max_week_assignment_pct=args.max_week_pct
+        if args.max_week_pct is not None else base_risk.max_week_assignment_pct,
         max_assignment_at_once=args.max_escrow_pct
         if args.max_escrow_pct is not None else base_risk.max_assignment_at_once,
     )
     warnings.append(
-        f"book-level risk active: {book.n_open_positions} positions, "
-        f"${book.put_escrow:,.0f} put escrow (caps: {risk_cfg.max_positions} "
-        f"positions, escrow <= {risk_cfg.max_assignment_at_once:.0%} of "
-        f"${args.cash:,.0f} NAV)")
+        f"book-level risk active: {book.n_open_positions} positions across "
+        f"{book.n_underlyings} names, ${book.put_escrow:,.0f} put escrow "
+        f"({book.put_escrow / args.cash:.0%} of ${args.cash:,.0f} NAV) — caps: "
+        f"{risk_cfg.max_underlyings} names, "
+        f"week escrow <= {risk_cfg.max_week_assignment_pct:.0%}, "
+        f"per-ticker <= {risk_cfg.max_pct_per_underlying:.0%}, "
+        f"total <= {risk_cfg.max_assignment_at_once:.0%}")
     # Cash-secured puts imply NAV >= escrow: floor the NAV assumption so
     # RISK-3/8 ratios are at least coherent, and say so loudly — pass
     # --cash <account NAV> for real checks.
@@ -536,9 +547,8 @@ def main(argv=None):
         warnings.append(
             f"assumed NAV ${args.cash:,.0f} < book escrow "
             f"${book.put_escrow:,.0f}: flooring NAV at escrow for risk "
-            "ratios — pass --cash <your account NAV> (and set RiskConfig "
-            "max_positions to your own cap; default 9) for meaningful "
-            "RISK-3/4/8 enforcement")
+            "ratios — pass --cash <your account NAV> for meaningful "
+            "RISK-3/5/8 enforcement")
         args.cash = book.put_escrow
 
     recs, guides = [], []

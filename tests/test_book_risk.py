@@ -33,21 +33,42 @@ def test_build_book_aggregates():
     assert book.same_week_count("2026-09-18") == 2
     assert book.same_week_count("2026-09-04") == 1
     assert book.same_week_count("2026-12-18") == 0
+    # normalized views (2026-08-31)
+    assert book.n_underlyings == 3 and book.has("tqqq")
+    assert book.escrow_for("TQQQ") == pytest.approx(25_000)
+    assert book.same_week_escrow("2026-09-18") == pytest.approx(44_500)
+    assert book.same_week_escrow("2026-09-04") == 0.0        # CC: no escrow
 
 
-def test_risk4_max_positions_enforced():
+def test_risk4_max_underlyings_enforced():
+    # 12 names already held; a NEW ticker would be the 13th -> flag
     bad = validate_open(_quote(), 1, 1_000_000, 0, 1_000_000, 0.0, False,
-                        RiskConfig(), n_open_positions=9)
-    assert "RISK-4:max_positions" in bad.flags
+                        RiskConfig(), n_underlyings=12, is_new_underlying=True)
+    assert "RISK-4:max_underlyings" in bad.flags
+    # same trade on a ticker ALREADY in the book adds no name -> fine
     ok = validate_open(_quote(), 1, 1_000_000, 0, 1_000_000, 0.0, False,
-                       RiskConfig(), n_open_positions=8)
-    assert "RISK-4:max_positions" not in ok.flags
+                       RiskConfig(), n_underlyings=12, is_new_underlying=False)
+    assert "RISK-4:max_underlyings" not in ok.flags
 
 
-def test_risk5_expiry_week_clustering_enforced():
-    bad = validate_open(_quote(), 1, 1_000_000, 0, 1_000_000, 0.0, False,
-                        RiskConfig(), n_same_expiry_week=3)
-    assert "RISK-5:expiry_week_clustering" in bad.flags
+def test_risk5_week_escrow_normalized():
+    # NAV 100k, cap 15%: 10k new + 6k already expiring that week = 16% -> flag
+    bad = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
+                        RiskConfig(), same_week_escrow=6_000)
+    assert "RISK-5:week_assignment_pct" in bad.flags
+    ok = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
+                       RiskConfig(), same_week_escrow=4_000)
+    assert "RISK-5:week_assignment_pct" not in ok.flags
+
+
+def test_risk3_counts_existing_ticker_escrow():
+    # NAV 100k, cap 15%: 10k new + 8k already on this ticker = 18% -> flag
+    bad = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
+                        RiskConfig(), underlying_escrow=8_000)
+    assert "RISK-3:concentration" in bad.flags
+    ok = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
+                       RiskConfig(), underlying_escrow=2_000)
+    assert "RISK-3:concentration" not in ok.flags
 
 
 def test_risk8_uses_aggregate_book_escrow():

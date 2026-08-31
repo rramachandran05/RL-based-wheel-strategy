@@ -27,10 +27,29 @@ class BookState:
     n_open_positions: int = 0
     put_escrow: float = 0.0                    # Σ strike·100·contracts (CSPs)
     expiry_week_counts: dict = field(default_factory=dict)   # iso (yr, wk) -> n
+    # Normalized views (2026-08-31): counts mislead when position sizes vary
+    # 10x (one TQQQ put != one META put), so the risk rules read dollars.
+    underlyings: set = field(default_factory=set)             # distinct tickers
+    expiry_week_escrow: dict = field(default_factory=dict)    # (yr, wk) -> $ CSP escrow
+    ticker_escrow: dict = field(default_factory=dict)         # ticker -> $ CSP escrow
+
+    @property
+    def n_underlyings(self) -> int:
+        return len(self.underlyings)
+
+    def has(self, ticker: str) -> bool:
+        return str(ticker).upper() in self.underlyings
+
+    def escrow_for(self, ticker: str) -> float:
+        return self.ticker_escrow.get(str(ticker).upper(), 0.0)
 
     def same_week_count(self, expiration) -> int:
         iso = pd.Timestamp(expiration).isocalendar()
         return self.expiry_week_counts.get((iso.year, iso.week), 0)
+
+    def same_week_escrow(self, expiration) -> float:
+        iso = pd.Timestamp(expiration).isocalendar()
+        return self.expiry_week_escrow.get((iso.year, iso.week), 0.0)
 
 
 def build_book(positions: list) -> BookState:
@@ -45,11 +64,17 @@ def build_book(positions: list) -> BookState:
         except Exception:
             continue
         book.n_open_positions += 1
-        if str(p.get("type", "")).upper() == "CSP":
-            book.put_escrow += strike * 100 * contracts
+        ticker = str(p.get("ticker", "")).upper()
+        book.underlyings.add(ticker)
         iso = exp.isocalendar()
         key = (iso.year, iso.week)
         book.expiry_week_counts[key] = book.expiry_week_counts.get(key, 0) + 1
+        if str(p.get("type", "")).upper() == "CSP":
+            escrow = strike * 100 * contracts
+            book.put_escrow += escrow
+            book.ticker_escrow[ticker] = book.escrow_for(ticker) + escrow
+            book.expiry_week_escrow[key] = \
+                book.expiry_week_escrow.get(key, 0.0) + escrow
     return book
 
 

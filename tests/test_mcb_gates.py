@@ -251,12 +251,13 @@ def test_recommend_opening_honors_risk_cfg_override():
     from rlbot.risk.engine import RiskConfig
 
     book = BookState(n_open_positions=22, put_escrow=0.0,
-                     expiry_week_counts={})
+                     expiry_week_counts={},
+                     underlyings={f"N{i}" for i in range(14)})
     cfg = RlbotConfig()
     rec = recommend_opening("T", _fake_frame(), PS, 1_000_000.0,
                             book=book, rcfg=cfg)
     assert rec["action"] == "WAIT" and "RISK-4" in rec["reason"]
     rec2 = recommend_opening("T", _fake_frame(), PS, 1_000_000.0,
                              book=book, rcfg=cfg,
-                             risk_cfg=RiskConfig(max_positions=30))
+                             risk_cfg=RiskConfig(max_underlyings=30))
     assert "RISK-4" not in rec2.get("reason", "")
