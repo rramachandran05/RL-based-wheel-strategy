@@ -86,8 +86,15 @@ def score_quote(q, spot: float, vol_proxy: float, valuation_state, cost_basis, c
         assign_prob = call_assignment_probability(spot, q.strike, t, q.vol_used)
         downside = assign_prob * max(0.0, (spot - q.strike) / spot) * ann
     val_mult = cfg.valuation_multiplier[ValuationState(int(valuation_state))]
+    # Real-chain-only terms (SPEC-004 formula; identically zero on the
+    # synthetic track, wired 2026-08-30): reward IV over the realized-vol
+    # proxy, penalize quoted spread.
+    vol_premium = (q.vol_used - vol_proxy) if q.oi is not None else 0.0
+    spread_cost = (q.spread_pct or 0.0) if q.oi is not None else 0.0
     return (
         cfg.w_premium_yield * premium_yield
+        + cfg.w_vol_premium * vol_premium
+        - cfg.w_spread_cost * spread_cost
         - cfg.w_downside * downside
         - cfg.w_assignment * assign_prob * val_mult
     )

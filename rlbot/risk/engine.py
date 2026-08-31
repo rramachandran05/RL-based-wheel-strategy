@@ -49,6 +49,11 @@ def validate_open(
     spot: float | None = None,
     cost_basis: float | None = None,
     val_cfg=None,
+    # Book-level inputs (2026-08-30 review fix): counts across the WHOLE
+    # book, fed by the daily assistant from the synced positions. Defaults
+    # keep single-sleeve simulation callers unchanged.
+    n_open_positions: int = 0,
+    n_same_expiry_week: int = 0,
 ) -> RiskDecision:
     if quote is None:
         return RiskDecision(True)
@@ -76,6 +81,10 @@ def validate_open(
 
     if nav > 0 and notional / nav > cfg.max_pct_per_underlying:
         flags.append("RISK-3:concentration")
+    if n_open_positions + 1 > cfg.max_positions:
+        flags.append("RISK-4:max_positions")
+    if n_same_expiry_week + 1 > cfg.max_new_per_expiry_week:
+        flags.append("RISK-5:expiry_week_clustering")
     if cfg.earnings_blackout and event_in_window:
         flags.append("RISK-7:earnings_blackout")
 

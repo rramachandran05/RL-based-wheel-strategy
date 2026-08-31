@@ -241,6 +241,9 @@ class WheelEnv:
 
     def _decide(self, policy, date, row, q_state, port, spot, vol, current_nav, source):
         pos = port.position_state
+        # SPEC-001 §7: portfolio_before is the PRE-trade snapshot (2026-08-30
+        # review fix — was recorded after open_short_option mutated port)
+        port_before = _port_dict(port, current_nav)
         action = policy.decide(pos, q_state, row)
         assert action in legal_actions(pos), f"illegal action {action} in {pos}"
 
@@ -287,6 +290,7 @@ class WheelEnv:
                     "expiration": str(quote.expiration.date()),
                     "dte": quote.dte, "delta": quote.delta,
                     "premium_fill": port.option.premium_fill,
+                    "contracts": port.option.contracts,
                     "premium_source": getattr(self.ps, "source_name", "synthetic_bs"),
                     "candidates_considered": n_cands,
                 }
@@ -299,7 +303,7 @@ class WheelEnv:
             available_actions=[int(a) for a in legal_actions(pos)],
             chosen_action=int(action), action_source=source,
             contract=contract_dict, risk=risk, n_candidates=n_cands,
-            portfolio_before=_port_dict(port, current_nav),
+            portfolio_before=port_before,
         )
         return port, pending
 
@@ -309,6 +313,7 @@ class WheelEnv:
         (port, pending_decision, committed, extra_cycle_or_None)."""
         opt = port.option
         pos = port.position_state
+        port_before = _port_dict(port, current_nav)   # pre-trade (2026-08-30 fix)
         m_state = encode_mgmt_state(row["market_regime"], opt.cp, spot, opt.strike, dte)
         ctx = {"cp": opt.cp, "strike": opt.strike, "dte": dte, "mark": mark,
                "premium_fill": opt.premium_fill, "spot": spot,
@@ -377,7 +382,7 @@ class WheelEnv:
             available_actions=[int(a) for a in legal_actions(pos)],
             chosen_action=int(action), action_source=source,
             contract=contract_dict, risk=risk, n_candidates=n_cands,
-            portfolio_before=_port_dict(port, current_nav),
+            portfolio_before=port_before,
             mgmt_state=m_state,
         )
         return port, pending, bool(committed), extra_cycle

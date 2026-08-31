@@ -21,8 +21,11 @@ def nav_metrics(nav: pd.Series) -> dict:
         "cagr": float(cagr),
         "total_return": float(nav.iloc[-1] / nav.iloc[0] - 1),
         "ann_vol": float(ann_vol),
-        "sharpe": float(cagr / ann_vol) if ann_vol > 0 else np.nan,
-        "sortino": float(cagr / downside) if downside and downside > 0 else np.nan,
+        # standard arithmetic Sharpe/Sortino (rf=0), not the CAGR hybrid
+        # (2026-08-30 review fix)
+        "sharpe": float(rets.mean() * 252 / ann_vol) if ann_vol > 0 else np.nan,
+        "sortino": float(rets.mean() * 252 / downside)
+        if downside and downside > 0 else np.nan,
         "max_drawdown": float(dd),
         "cvar5_monthly": float(cvar5) if pd.notna(cvar5) else None,
         "days": int(len(nav)),

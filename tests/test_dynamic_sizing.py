@@ -24,17 +24,19 @@ def test_sized_run_deploys_multiple_contracts():
 
 def test_sizing_scales_contracts_with_capital():
     """4x the capital -> ~4x the contracts on the first open (lumpy at small
-    counts, so returns aren't exactly scale-invariant — sizing is)."""
+    counts, so returns aren't exactly scale-invariant — sizing is). Also
+    asserts the 2026-08-30 fix: portfolio_before is the PRE-trade snapshot."""
     frame = make_frame(n=300, seed=5)
     env1 = WheelEnv("TEST", frame, PS, dynamic_sizing=True)
 
-    def first_open_cash_jump(cash):
+    def first_open(cash):
         res = env1.run(FixedWheelPolicy(), "2021-01-04", "2021-12-31",
                        starting_cash=cash)
         d = next(d for d in res.decisions if d.contract is not None)
-        return d.portfolio_before["cash"] - cash   # premium proceeds of open #1
+        assert d.portfolio_before["cash"] == pytest.approx(cash)  # pre-trade
+        return d.contract["contracts"]
 
-    small, big = first_open_cash_jump(50_000), first_open_cash_jump(200_000)
+    small, big = first_open(50_000), first_open(200_000)
     assert big / small == pytest.approx(4.0, rel=0.30)
 
 

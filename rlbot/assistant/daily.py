@@ -103,7 +103,8 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
-                      valuation=None, val_cfg=None) -> dict:
+                      valuation=None, val_cfg=None,
+                      book=None, rcfg=None) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -148,10 +149,24 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
                                      cfg=SelectorConfig(),
                                      valuation=valuation, val_cfg=val_cfg)
-    risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
-                         RiskConfig.single_ticker(),
-                         valuation=valuation, spot=out["spot"],
-                         val_cfg=val_cfg)
+    # Book-level enforcement (2026-08-30): with a book, the whole
+    # position set feeds RISK-4/5/8 and the estimated-earnings blackout.
+    if book is not None and quote is not None and rcfg is not None:
+        from rlbot.risk.book import earnings_in_window
+        risk = validate_open(
+            quote, 1, cash, 0, cash,
+            open_put_escrow=book.put_escrow,
+            event_in_window=earnings_in_window(ticker, quote.expiration, rcfg),
+            cfg=RiskConfig(),                      # portfolio-mode caps
+            valuation=valuation, spot=out["spot"], val_cfg=val_cfg,
+            n_open_positions=book.n_open_positions,
+            n_same_expiry_week=book.same_week_count(quote.expiration),
+        )
+    else:
+        risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
+                             RiskConfig.single_ticker(),
+                             valuation=valuation, spot=out["spot"],
+                             val_cfg=val_cfg)
     if quote is None:
         out["action"] = "WAIT"
         out["reason"] = ("no strike clears the valuation ceiling in the "
@@ -451,6 +466,37 @@ def main(argv=None):
         return synth
 
     store = FrameStore(cfg)
+
+    # positions sync moved BEFORE openings (2026-08-30) so the book feeds
+    # book-level risk checks on every recommendation
+    pos_path = args.positions or cfg.data.base_path / "positions.csv"
+    if not args.no_sync_positions:
+        from rlbot.data.positions_sheet import fetch_active_positions, write_positions_csv
+        synced, sync_warns = fetch_active_positions(pd.Timestamp.now().normalize())
+        warnings.extend(sync_warns)
+        if synced or not sync_warns:
+            write_positions_csv(synced, pos_path)
+            warnings.append(f"positions.csv synced from monitor sheet: "
+                            f"{len(synced)} active position(s)")
+    positions, pos_warn = load_positions(pos_path)
+    if pos_warn:
+        warnings.append(pos_warn)
+    from rlbot.risk.book import build_book
+    book = build_book(positions)
+    warnings.append(f"book-level risk active: {book.n_open_positions} positions, "
+                    f"${book.put_escrow:,.0f} put escrow")
+    # Cash-secured puts imply NAV >= escrow: floor the NAV assumption so
+    # RISK-3/8 ratios are at least coherent, and say so loudly — pass
+    # --cash <account NAV> for real checks.
+    if book.put_escrow > args.cash:
+        warnings.append(
+            f"assumed NAV ${args.cash:,.0f} < book escrow "
+            f"${book.put_escrow:,.0f}: flooring NAV at escrow for risk "
+            "ratios — pass --cash <your account NAV> (and set RiskConfig "
+            "max_positions to your own cap; default 9) for meaningful "
+            "RISK-3/4/8 enforcement")
+        args.cash = book.put_escrow
+
     recs, guides = [], []
     latest = None
     for t in cfg.assistant_universe:
@@ -470,7 +516,8 @@ def main(argv=None):
         recs.append(recommend_opening(t, frame, ps_for(t, frame.index[-1]),
                                       args.cash, policy=policy, leveraged=lev,
                                       valuation=valuations.get(t),
-                                      val_cfg=cfg.val_gates))
+                                      val_cfg=cfg.val_gates,
+                                      book=book, rcfg=cfg))
     cand_recs = []
     for cand in candidates:
         try:
@@ -511,18 +558,6 @@ def main(argv=None):
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
 
-    pos_path = args.positions or cfg.data.base_path / "positions.csv"
-    if not args.no_sync_positions:
-        from rlbot.data.positions_sheet import fetch_active_positions, write_positions_csv
-        synced, sync_warns = fetch_active_positions(pd.Timestamp.now().normalize())
-        warnings.extend(sync_warns)
-        if synced or not sync_warns:      # reachable sheet (even if empty) wins
-            write_positions_csv(synced, pos_path)
-            warnings.append(f"positions.csv synced from monitor sheet: "
-                            f"{len(synced)} active position(s)")
-    positions, pos_warn = load_positions(pos_path)
-    if pos_warn:
-        warnings.append(pos_warn)
     for p in positions:
         tkr = str(p["ticker"]).upper()
         if tkr in cfg.assistant_universe:
