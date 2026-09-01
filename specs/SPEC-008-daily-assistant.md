@@ -7,13 +7,16 @@ _Status: draft v1 — 2026-08-22. Productionizes the twice-validated rule policy
 One command turns the research system into a daily decision aid:
 
 ```
-python -m rlbot.assistant.daily [--download] [--cash 100000] \
-       [--positions data_local/positions.csv]
+python -m rlbot.assistant.daily [--download] [--cash <account NAV>] \
+       [--positions data_local/positions.csv] \
+       [--max-underlyings N] [--max-week-pct F] [--max-escrow-pct F]
 ```
 
-1. `--download`: refresh Tiingo bars + FRED VIX, rebuild canonical tables (full re-pull; incremental update is a wish-list item).
+1. `--download`: refresh Alpha Vantage bars/chains (Tiingo fallback) + FRED
+   VIX, rebuild canonical tables, refresh the MCB report
+   (`../mcb-wheel/run_mcb.py`, sheet-driven — SPEC-011).
 2. Build frames with `use_valuation_proxy=True` (sheet FV snapshots still win where present, SPEC-007 §3.1).
-3. **Opening recommendations** per universe ticker from the latest row: Q-state → B3 action → synthetic chain (G1-fitted `iv_uplift`) → selector → risk engine → recommendation object (SPEC-006 §6 shape).
+3. **Opening recommendations** per universe ticker from the latest row: Q-state → B3 action → chain (real prev-close snapshot where accrued, else synthetic with G1-fitted `iv_uplift`) → SPEC-011 MCB gates (layer-A mask, net-basis ceiling pre-filter) → selector → book-level risk engine (SPEC-004 §2.1, fed by `BookState` from the synced positions) → recommendation object (SPEC-006 §6 shape).
 4. **Position guidance** for open positions listed in `positions.csv` (columns: `ticker,type,strike,expiration,premium_fill` with type ∈ {CSP, CC}): management state, current model delta and premium-captured, and guidance = **HOLD** (the validated incumbent), with attention flags for breach, delta ≥ 0.40, and expiry week. The brief carries the standing G3 finding: do not roll mechanically on MOS.
 5. Outputs: `data_local/live/brief_<date>.md` (human) + `recommendations_<date>.json` (machine), and every decision appended to `data_local/live/decisions.jsonl` as a `trajectory_v2` record with null outcome fields (outcomes attach when a future run or retest closes them).
 
@@ -39,7 +42,7 @@ Each run (unless `--no-sync-positions`) fetches the link-shared monitor tab (she
 
 - Premiums and deltas are **model values** (synthetic BS, calibrated to the PUT index at the index level). Always compare against live broker quotes before trading; if the live premium is materially below model, the compensation gate that justified the trade may not hold.
 - Recommendations only — the system never executes. Not investment advice.
-- Portfolio cash/NAV come from `--cash` (single-sleeve assumption); risk caps are per-ticker.
+- `--cash` is the **account NAV** the escrow ratios divide by (2026-08-31): risk caps are book-level (SPEC-004 §2.1 normalized rules), and the positions sync runs *before* openings so every recommendation sees the whole book. If NAV < synced put escrow, NAV is floored at escrow with a loud warning — pass the real number.
 - Bars must be fresh: the brief warns if the latest bar is > 3 trading days old.
 
 ## 3. Requirements & acceptance

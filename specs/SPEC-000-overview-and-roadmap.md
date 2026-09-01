@@ -32,6 +32,10 @@ This project uses its **own venv (Python ≥ 3.11)**. Vendored 3.8-era modules a
 | SPEC-006 | Baselines, walk-forward evaluation, metrics, gates | evaluation | no |
 | SPEC-001A | Management-state addendum (SPEC-001 v2: MgmtStateV1, roll mechanics, trajectory_v2) | interface | **yes — extends frozen SPEC-001 by version bump** |
 | SPEC-007 | MVP-3 rescope: management-policy learning (G3) + AV valuation proxy (G2-rerun) | learning | no |
+| SPEC-008 | Daily assistant, ETF policy, positions sync, live trajectory logging | assistant | no |
+| SPEC-009 | Valuation gates on Wheel-FV ensemble — **superseded live by SPEC-011** (modules retained for G7) | risk | no |
+| SPEC-010 | Momentum candidates feed (Feed B) + three-codebase integration; momentum decoupled from timing | data/assistant | no |
+| SPEC-011 | MCB gates: `../mcb-wheel` Maximum-Comfortable-Basis report as the live valuation constraint (2026-08-31) | risk | no |
 
 SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy, and assistant layers all program against it, so the learning method can be swapped (Q-table → bandit → ICRL) without touching the simulator, and every trajectory logged from day one stays usable.
 

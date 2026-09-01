@@ -1,6 +1,12 @@
 # SPEC-009 — Valuation Gates: Wheel-FV Boundaries, Action Masks, NO_CALL
 
-_Status: implemented v1 — 2026-08-27 (companion to fair-value-discount SPEC-002)_
+_Status: implemented v1 — 2026-08-27 (companion to fair-value-discount
+SPEC-002). **SUPERSEDED as the live feed 2026-08-31 by SPEC-011 (MCB
+gates)**: the daily assistant now consumes `../mcb-wheel`'s
+Maximum-Comfortable-Basis report instead of the Wheel-FV ensemble. The
+modules below (`valuation.py`, `fv_ensemble.py`, VAL-1/2/3 flags, selector
+`valuation=` path) are retained for gate-history tooling and the G7
+retrospective, but no longer run in the daily brief._
 
 ## 0. Motivation and division of labor
 

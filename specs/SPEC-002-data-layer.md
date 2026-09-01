@@ -33,6 +33,16 @@ Trend bucket mapping (logged feature): Bull Trend→4, Recovery→3, Base→2, P
 Implements SPEC-001 §3.1 exactly. Inputs: SPY bars (Tiingo) + VIX daily closes. **VIX source: FRED `VIXCLS` series (free CSV, no key)**, snapshotted to `data_local/external/vixcls.csv`. `vix_pct_5y` = rolling 1260-trading-day percentile, right-inclusive, min 252 observations. The sibling's `market_regime.py` (manual Fear & Greed input) is **not** reused for training; its 5-band posture mapping may inform the live assistant later.
 
 ### 3.4 Valuation — adapter over the sibling's FV signal
+
+> **2026-08-31 note:** everything below concerns the Q-state's frozen
+> 3-level `valuation_state` axis (sheet anchors + EPS proxy) — still
+> current. The separate **valuation-gate feed** has moved twice: sheet FV →
+> fair-value-discount ensemble (SPEC-009) → `../mcb-wheel` MCB report
+> (SPEC-011, live). MCB ingestion: `rlbot/data/mcb_feed.py` reading
+> `DataConfig.mcb_dir` (`../mcb-wheel/outputs/mcb_<date>.csv`), PIT-safe,
+> 5-trading-session staleness. Bars/chains/EPS are Alpha Vantage premium
+> primary with Tiingo fallback (2026-08-29), superseding the Tiingo-primary
+> wording elsewhere in this spec.
 - **Live/recent:** ingest the dated `fair_value_*.csv` snapshots (`Ticker, Price, FV_Buy, FV_Sell, …, Source, Confidence`) produced by `../wheel-strategy` (13 snapshots exist, 2026-07-26 →). New snapshots keep accruing from the sibling's daily run; an import job copies them into `canonical.valuation`.
 - **Historical era:** no valuation series exists. Per SPEC-001 §3.1, `valuation_state = FAIR` when FV unknown. This is a declared limitation: in the training era the valuation dimension is inert, and the Q-table's valuation axis only differentiates once live-era data accrues (or a historical FV series is acquired — e.g. FMP historical price-target consensus, a paid-tier item, tracked as **DATA-GAP-3**).
 - The pure anchor math (`fv_anchors`, `buy_sell_levels`, `etf_fv_proxy` from `fv_levels.py`) is vendored for the live path; the Google-Sheet fetch is not part of this project.

@@ -36,19 +36,30 @@ If the filter leaves zero candidates in-band: widen delta band by ±0.02 once; i
 
 Validation runs **after** selection, **before** execution. Never learnable, never bypassable (the simulator and live path share one implementation; there is no code path from policy to execution that skips it).
 
-### 2.1 Hard rules (v1)
+### 2.1 Hard rules (v1; RISK-3/4/5 normalized 2026-08-31)
+
+Position **counts** mislead when sizes vary 10x (one TQQQ put escrows ~$5K,
+one META put ~$62K), so every capital rule reads **escrow / NAV**. The one
+surviving count is distinct underlyings — an attention cap, which genuinely
+doesn't scale with dollars. Book-level inputs come from `rlbot/risk/book.py`
+(`BookState`: per-ticker escrow, per-expiry-week escrow, distinct tickers),
+built from the synced positions each daily run (2026-08-30 review fix).
 
 | ID | Rule | Default |
 |---|---|---|
 | RISK-1 | Cash-secured puts only: escrow strike×100×contracts available | — |
 | RISK-2 | No naked calls: shares ≥ 100×contracts before SELL_CALL | — |
-| RISK-3 | Max capital per underlying | 15% of NAV |
-| RISK-4 | Max simultaneous positions | 9 |
-| RISK-5 | Max new positions per expiry ISO-week | 3 |
+| RISK-3 | Max put escrow per underlying, **existing + new** (book-aware; covered calls exempt — the share exposure exists regardless) | 15% of NAV |
+| RISK-4 | Max **distinct underlyings** (was: 9 positions) — a trade on a ticker already held adds no name | 12 |
+| RISK-5 | Max put escrow expiring in one ISO-week, existing + new (was: 3 positions/week) — bounds what a single expiry Friday can force onto the book; put-side only, CC assignment is the intended exit | 15% of NAV |
 | RISK-6 | Liquidity floor (real chains): min_oi, max_spread_pct as §1.1 | — |
-| RISK-7 | Earnings blackout: no opening trade whose window contains a known earnings date (live-era only until DATA-GAP-2 closes) | on |
+| RISK-7 | Earnings blackout: no opening trade whose window contains the estimated next earnings date (AV `reportedDate` + ~91d, ±5d tolerance; live-era only) | on |
 | RISK-8 | **Synchronized-assignment cap:** Σ over open short puts of (strike×100×contracts) ≤ `max_assignment_at_once` × NAV. Portfolio-level; per-ticker Q-tables cannot see this tail risk, so it lives here permanently | 40% of NAV |
 | RISK-9 | Correlation-cluster cap: no new put on a ticker whose 120d return corr ≥ 0.80 with ≥ 2 existing short-put underlyings (vendored `portfolio_risk` machinery, structured wrapper) | on |
+
+Live overrides: `--max-underlyings / --max-week-pct / --max-escrow-pct`
+(daily assistant CLI); NAV comes from `--cash`. The `single_ticker()` preset
+(simulation episodes) relaxes all book caps to the whole sleeve by design.
 
 ### 2.2 Disposition
 On violation: step the action down one risk tier and re-select (once); if still violating → WAIT. Every rejection/downgrade is logged in `risk_checks.flags` with rule IDs. E5 epochs (SPEC-001 §5): if a *held* position violates a rule that applies to held positions (RISK-8 after NAV drop), a management epoch is forced.
