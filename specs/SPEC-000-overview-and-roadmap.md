@@ -1,6 +1,6 @@
 # SPEC-000 — Overview, Roadmap, and Spec Index
 
-_Status: draft v1 — 2026-08-21_
+_Status: living doc — v1 2026-08-21, last reconciled with the code 2026-08-31_
 _Parent doc: [APPROACH.md](../APPROACH.md)_
 
 ## 1. What this project is
@@ -9,9 +9,28 @@ An event-driven, hierarchical RL system for the options wheel strategy. An RL po
 
 **Falsifiable claim:** the learned policy must beat a simple rule-based adaptive wheel (Baseline 3) out-of-sample, or the learning layer is not justified. Steps before that gate produce a useful rule-driven assistant regardless.
 
-## 2. Relationship to the existing `wheel-strategy` project
+**Where it landed (2026-08-31):** every learning gate failed honestly — G2,
+G2-rerun, and the trend ablation for openings; G3 and its real-chain retest
+for management. The falsifiable claim is falsified for this state space, and
+the fallback deliverable is the production system: a **rule-driven daily
+assistant** (B3 openings + hold-to-expiry + selector + book-level risk
+engine + SPEC-011 MCB gates), running weekdays 06:00 CT via LaunchAgent,
+logging every decision as a `trajectory_v2` record. Learning is not dead —
+it waits on materially new signal (see MVP-4) — but no learned component is
+in production.
 
-The sibling repo `../wheel-strategy` (Python 3.8, Tiingo OHLCV, synthetic Black-Scholes premiums, rule-based daily brief) is the seed. SPEC-002 §4 has the full reuse map. Headlines:
+## 2. Relationship to the sibling projects
+
+**As of 2026-08-31 the live constellation is three repos + one sheet:**
+`momentum-monitor` (in `../vmi-stock-search`, Sat 07:00 — candidate names
+only, SPEC-010) → `../mcb-wheel` (Maximum-Comfortable-Basis report — the
+valuation constraint, SPEC-011) → this repo (underwriter + monitor). The
+Google Sheet (FV tab + monitor tab) is the system of record for the universe
+and open positions. `../wheel-strategy` is **archive/provenance only**
+(SPEC-008 §1c); `../fair-value-discount` still runs standalone but no longer
+feeds the daily brief (SPEC-009 superseded).
+
+The sibling repo `../wheel-strategy` (Python 3.8, Tiingo OHLCV, synthetic Black-Scholes premiums, rule-based daily brief) was the seed. SPEC-002 §4 has the full reuse map. Headlines:
 
 - **Reuse as-is (vendored):** `technicals.py` (indicators, structure/momentum classifiers), `options_engine.py` (BS pricing, assignment probability, EV — becomes the synthetic `PremiumSource`), `data_access.py` (Tiingo + CSV cache), `portfolio_risk.py` (concentration/correlation/clustering checks).
 - **Reuse as pattern/seed:** `wheel_backtest.simulate_wheel` (seed of the simulator step loop), `optimize_wheel_mult` (an extra baseline), `daily_brief.analyze_ticker` (observation-vector assembly), `fv_levels.py` anchor math (valuation feature), `config.py` dataclass pattern.
@@ -79,7 +98,16 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 
 > **G4 (per-ticker IV vol-comp A/B, 2026-08-23): PASSED — adopted with a small effect.** Paired B3 episodes on real premiums, market-proxy vs ticker-IV vol comp, fixed thresholds, no fitting: pooled +0.015%/yr, 2022-bear episodes +0.32%/yr (the pre-registered mechanism check), dd ratio 1.06 ≤ 1.10, decisions diverged in 34% of episodes. Honest read: marginal, mechanism-consistent; adopted per protocol as the daily brief default (`--market-volcomp` reverts). Also this cycle: predecessor-era greeks are placeholders (real marks kept, BS-delta substituted, counted); the earlier "WAIT-in-stress cost 7pts in 2022" shrank to ~1pt after that fix (META artifact); daily brief now quotes real prev-close chains (~16 req/day refresh); liquidity screen tuned ($0.05 spread floor, 20% junk cap).
 
-**MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist.
+> **Status 2026-08-27 → 08-31 — production hardening + integration era.**
+> **Three-codebase integration live (SPEC-010):** momentum-monitor supplies candidate *names* (Sat 07:00, SQLite feed, SPY-members-only, capped CONSERVATIVE); the sheet-driven universe sync makes the FV sheet tab the live core list; candidates render in their own brief section. Momentum is contractually decoupled from timing.
+> **Valuation-gate feed swapped twice:** sheet FV → fair-value-discount Wheel-FV ensemble (SPEC-009, 2026-08-27) → **`../mcb-wheel` MCB report (SPEC-011, 2026-08-31, current)**. Puts must land `strike − premium ≤ MCB(required tier)`; tier = deeper of the report's guardrail tier and regime posture; MONITOR_ONLY/HALT never trade; reachability is informational; empty scans are attributed honestly (ceiling blamed only when dropping it finds a contract). ETFs now carry drawdown-derived ceilings.
+> **External-review hardening (2026-08-30):** `portfolio_before` snapshotted pre-trade in the simulator; standard arithmetic Sharpe/Sortino; selector VolPremium/SpreadCost terms actually wired; jsonschema packaging fixed; earnings blackout live (AV `reportedDate` + 91d estimate, ±5d); **book-level risk** — positions sync moved before openings, `BookState` feeds RISK-3/4/5/8 across the whole book.
+> **Book risk normalized (2026-08-31):** counts → escrow/NAV (RISK-3 book-aware per-ticker 15%, RISK-4 → 12 distinct underlyings, RISK-5 → same-week escrow ≤ 15%); CLI `--cash <NAV> --max-underlyings --max-week-pct --max-escrow-pct`; runner set to the user's $1M NAV.
+> **B3 absolutes corrected after the dynamic-contract-sizing fix** (`data_local/reports/b3_performance_historical.json`, supersedes the 2026-08-23 figures above): Full 2013–2026 **+29.0% CAGR / −42.8% maxDD** ($100K→$3.19M); Test-1 2022–23 +9.2%/−17.2%; Test-2 2024–26 +15.5%/−13.6%. Microstructure sensitivity ±1–2 pts/yr; ~$50K minimum viable capital, validated config ~$100K+.
+> **Operations:** LaunchAgent weekdays 06:00 CT (`scripts/run_daily.sh`, installed under `~/Library/Application Support/wheel-rlbot/`); momentum monitor Sat 07:00; AV Premium is the primary data vendor (bars/chains/EPS, paced sequential requests), Tiingo fallback. Test suite: 204.
+> **Open items:** G6 (leveraged-ETF technical anchors — reframed by MCB's ETF zones), G7 (retrospective net-basis-gate A/B with proxy ceilings), fallback-share gating in evaluations, lockfile/CI/README reproducibility, bootstrap CIs.
+
+**MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist. _(Both now exist and failed; ICRL additionally needs a fundamentally richer state/signal — e.g. real-IV dynamics — before it is worth reopening.)_
 
 ## 5. Non-goals (v1)
 
@@ -87,33 +115,44 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 - No multi-ticker portfolio *policy* (portfolio effects live in the risk engine; per-ticker policies only).
 - No early-exercise/dividend assignment modeling (expiration-only; config hook exists).
 - No neural policies before MVP 4.
-- No second valuation model — ingest the existing FV signal.
+- No in-repo valuation model — ingest the external signal (the MCB report since 2026-08-31; Wheel-FV ensemble before that).
 
-## 6. Repo layout (target)
+## 6. Repo layout (as built, 2026-08-31)
 
 ```
 wheel-strategy-rlbot/
 ├── APPROACH.md
-├── specs/
+├── specs/                 # SPEC-000 … SPEC-011
+├── scripts/               # run_daily.sh + LaunchAgent plist (weekdays 06:00 CT)
 ├── rlbot/
-│   ├── config.py
+│   ├── config.py          # RlbotConfig / DataConfig (incl. mcb_dir) / gate configs
 │   ├── vendor/            # copied unchanged from ../wheel-strategy (provenance header added)
 │   │   ├── technicals.py
 │   │   ├── options_engine.py
 │   │   ├── data_access.py
-│   │   └── portfolio_risk.py
-│   ├── data/              # adapters + canonical table builders   (SPEC-002)
-│   ├── features/          # per-day feature/state series           (SPEC-002)
-│   ├── state/             # state machine + encoder                (SPEC-001)
-│   ├── options/           # premium sources, selector              (SPEC-004)
-│   ├── risk/              # hard constraints                       (SPEC-004)
+│   │   ├── portfolio_risk.py
+│   │   └── sheet_data.py  # Google-Sheet fetch/parse primitives (positions + FV tabs)
+│   ├── data/              # adapters + canonical builders          (SPEC-002)
+│   │   ├── av_bars.py / sources.py / unadjusted.py   # AV-primary bars, Tiingo fallback
+│   │   ├── options_ingest.py / daily_chain_update.py / merge_predecessor_chains.py  # AV option chains (34M-row backfill + daily accrual)
+│   │   ├── mcb_feed.py    # MCB report loader — live valuation feed (SPEC-011)
+│   │   ├── fv_ensemble.py # Wheel-FV loader — retained, superseded  (SPEC-009)
+│   │   ├── fv_snapshot.py # sheet FV anchors → Q-state valuation axis (SPEC-008 §1c)
+│   │   ├── candidates.py  # momentum candidate feed                (SPEC-010)
+│   │   └── positions_sheet.py  # monitor-tab positions sync        (SPEC-008 §1b)
+│   ├── features/          # per-day feature/state series + ticker_iv (SPEC-002, G4)
+│   ├── state/             # state machine + encoder + mgmt states  (SPEC-001/001A)
+│   ├── options/           # premium sources (synthetic + historical), selector (SPEC-004)
+│   ├── risk/              # engine (normalized book rules), book.py (BookState,
+│   │   #  earnings estimates), mcb_gates.py (SPEC-011), valuation.py (SPEC-009, retained)
 │   ├── simulator/         # environment, execution, portfolio      (SPEC-003)
 │   ├── learning/          # sweep, estimators, promotion           (SPEC-005)
-│   ├── benchmarks/        # baselines 1–4 (+ grid-search)          (SPEC-006)
-│   ├── evaluation/        # walk-forward, metrics, reports         (SPEC-006)
-│   └── assistant/         # recommendation object, explanation
-├── tests/                 # pytest; every spec's ACs map to tests
-└── data_local/            # gitignored: bars, external CSVs, snapshots, trajectories
+│   ├── benchmarks/        # baselines 1–4 + leveraged-ETF policy   (SPEC-006/008)
+│   ├── evaluation/        # walk-forward, metrics, b3_performance  (SPEC-006)
+│   └── assistant/         # daily.py — the production entry point  (SPEC-008)
+├── tests/                 # pytest, 204 at last reconcile; every spec's ACs map to tests
+└── data_local/            # gitignored: bars, chains, external CSVs, snapshots,
+    #  live/ (briefs, recommendations, decisions.jsonl), reports/ (G-series verdicts)
 ```
 
 ## 7. Conventions
