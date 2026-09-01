@@ -32,6 +32,8 @@ Ties: highest premium wins; then nearest DTE to 30. Weights are config, logged i
 ### 1.3 Degradation
 If the filter leaves zero candidates in-band: widen delta band by ±0.02 once; if still empty, return `None` (the tier is unimplementable today → WAIT, logged with reason).
 
+The delta bands are the **executable** boundary and keep the RL actions' frozen semantics (SPEC-001). When the empty scan is caused by the MCB ceiling rather than the chain, the below-band `MCB_OPPORTUNITY_SCAN` (SPEC-011 §6) may additionally surface an advisory-only candidate — outside the RL action space, never executed by the selector.
+
 ## 2. Risk engine — RL proposes, risk engine disposes
 
 _(v2 — 2026-08-31: two-tier disposition, potential-exposure RISK-3,

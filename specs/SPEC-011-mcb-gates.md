@@ -1,7 +1,8 @@
 # SPEC-011 — MCB Gates: Maximum-Comfortable-Basis Feed Replaces Wheel-FV
 
 _Status: implemented v1 — 2026-08-31 (consumer side of `../mcb-wheel`'s
-contract; supersedes SPEC-009 as the live valuation-gate input)._
+contract; supersedes SPEC-009 as the live valuation-gate input).
+§6 opportunity scan added 2026-09-01 — **specced, not yet implemented**._
 
 ## 0. Motivation
 
@@ -93,7 +94,109 @@ the frozen 3-state `ValuationState` in the Q-state is untouched, as always.
   position flag, CC exempt; brief renders MCB columns + legend.
 - Full suite green (204 at merge).
 
-## 6. Out of scope
+## 6. MCB opportunity scan — advisory pathway (v2, 2026-09-01)
+
+_Design review conclusion: the WAIT behavior when no in-band strike clears
+the MCB ceiling is logically correct, but the selector was too rigid in how
+it defined "conservative." **Delta describes risk; economics determine
+whether the trade is worthwhile.** The MCB ceiling stays hard; the
+DEFENSIVE delta floor (0.05) stays the executable boundary; what was
+missing is visibility into MCB-compliant strikes *below* the bands._
+
+### 6.1 Placement in the architecture
+
+```
+RL action → normal delta-band selector → MCB gate
+                     │ no candidate
+                     ▼
+        MCB_OPPORTUNITY_SCAN (advisory, outside the RL action space)
+                     │
+        economics + liquidity ──→ unattractive        → WAIT (with the data)
+                              └─→ potentially attractive → ⚠ HUMAN REVIEW
+```
+
+The scan is **not** the RL policy choosing another action — the frozen
+SPEC-001 action semantics are untouched (DEFENSIVE still means Δ 0.05–0.10
+for the executable scan; letting the selector wander to Δ 0.003 while still
+calling it DEFENSIVE would change the meaning of an RL action without
+retraining). The scan is the system saying: *"your requested action couldn't
+produce an acceptable trade — here is whether anything farther OTM is worth
+human consideration."*
+
+### 6.2 Algorithm
+
+Runs only after the normal tier scan returns no MCB-compliant candidate,
+and only when an MCB ceiling exists for the name:
+
+1. Examine strikes **below** the tier band, progressively farther OTM —
+   including below the 0.05 DEFENSIVE floor — within the normal DTE window
+   (25–45).
+2. Require `strike − premium ≤ MCB(required tier)` (the hard rule, unchanged).
+3. Apply the normal RISK-6 liquidity rules (min OI, spread caps).
+4. Compute annualized return on the escrowed capital:
+
+   `ROC_ann = premium / (strike − premium) × 365 / DTE`
+
+   (the question is not "can I buy AAPL at $200?" but "is someone paying me
+   enough to reserve $20K while I wait for that possibility?").
+5. Surface the best candidate **only as an advisory**, classified by a
+   minimum worthwhile-return threshold (`min_opportunity_roc`, default
+   **10%/yr**, config).
+
+### 6.3 Advisory content
+
+The advisory must show enough for the human to judge, not just a strike:
+
+| Metric | Why |
+|---|---|
+| Strike | Acquisition price |
+| Premium (bid/mid where real) | Actual compensation |
+| Net basis | Must satisfy MCB |
+| Delta | How far outside the normal RL band |
+| DTE | Holding period |
+| Annualized ROC on escrow | Opportunity cost |
+| OI / spread | Executability |
+| MCB headroom | How comfortably below the ceiling |
+| Assessment | **attractive → HUMAN REVIEW** / unattractive → WAIT |
+
+### 6.4 Two states that were previously collapsed
+
+The scan outcome refines what "unreachable" means in the brief:
+
+* **MCB geometrically unreachable** — no strike/premium combination in the
+  chain satisfies the ownership ceiling at all.
+* **MCB reachable but economically unattractive** — a compliant strike
+  exists, but premium/liquidity/ROC is too poor to justify tying up the
+  cash ("MCB-compliant strikes exist, but are not economically tradeable").
+
+Both remain WAIT; the reason string and JSON must distinguish them. In a
+volatility event the same scan flips naturally: the compliant strike's
+premium fattens, ROC clears the threshold, and the row escalates to
+⚠ HUMAN REVIEW — which is exactly when reachability turns and deep-OTM
+selling becomes genuinely interesting.
+
+### 6.5 Promotion path (explicitly deferred)
+
+The scan ships advisory-only. It may later become a human-approved
+*executable* pathway **only if** a retrospective backtest on real chains
+demonstrates that below-0.05-delta, MCB-compliant opportunities have
+worthwhile ROC and outcomes (gate **G8**, to be specced alongside G7's
+proxy-ceiling machinery). Until that verdict exists, the advisory never
+feeds `decisions.jsonl` as a chosen action.
+
+### 6.6 Acceptance (planned)
+
+* AC-6.1 Harsh-ceiling fixture on a healthy chain → advisory row with all
+  §6.3 metrics; thin premium → "economically unattractive — WAIT".
+* AC-6.2 Elevated-IV fixture (compliant strike pays ≥ threshold) →
+  "below-band opportunity — HUMAN REVIEW" and the brief renders it under
+  the human-review section.
+* AC-6.3 No compliant strike in the whole chain → "geometrically
+  unreachable"; the two reason strings are distinct in JSON and brief.
+* AC-6.4 The RL decision record is unchanged in all cases (WAIT, action 0);
+  the advisory lives outside the trajectory action.
+
+## 7. Out of scope
 
 - MCB computation of any kind (`../mcb-wheel` owns it).
 - Feeding MCB into training/backtests (no point-in-time MCB history exists).
