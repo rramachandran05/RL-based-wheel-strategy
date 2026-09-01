@@ -111,18 +111,31 @@ def test_risk2_naked_call():
     assert not bad.passed and "RISK-2:naked_call" in bad.flags
 
 
-def test_risk8_assignment_at_once_portfolio_mode():
-    cfg = RiskConfig()  # portfolio defaults: 40% cap
+def test_risk8_stress_reserve_portfolio_mode():
+    # SPEC-004 §2.6: cash 100k, NAV 100k, reserve 15% -> stress must leave
+    # >= 15k. Fallback stress (no precomputed value) = escrow + notional.
+    cfg = RiskConfig()
     bad = validate_open(_quote(strike=350.0), 1, cash=100_000, shares=0, nav=100_000,
-                        open_put_escrow=10_000, event_in_window=False, cfg=cfg)
-    assert "RISK-8:assignment_at_once" in bad.flags
+                        open_put_escrow=60_000, event_in_window=False, cfg=cfg)
+    assert "RISK-8:stress_reserve" in bad.flags   # 100k - 95k = 5% < 15%
+    ok = validate_open(_quote(strike=350.0), 1, cash=100_000, shares=0, nav=100_000,
+                       open_put_escrow=60_000, event_in_window=False, cfg=cfg,
+                       stressed_assignment=50_000)   # precomputed: 50% left
+    assert "RISK-8:stress_reserve" not in ok.flags
 
 
-def test_risk7_earnings_blackout():
-    bad = validate_open(_quote(), 1, cash=100_000, shares=0, nav=1_000_000,
-                        open_put_escrow=0, event_in_window=True,
-                        cfg=RiskConfig.single_ticker())
-    assert "RISK-7:earnings_blackout" in bad.flags
+def test_risk7_earnings_is_warning_not_block():
+    # SPEC-004 §2.5: earnings overlap surfaces for human review; never blocks
+    d = validate_open(_quote(), 1, cash=100_000, shares=0, nav=1_000_000,
+                      open_put_escrow=0, event_in_window=True,
+                      cfg=RiskConfig.single_ticker(),
+                      earnings_info={"date": "2026-10-28",
+                                     "source": "estimated",
+                                     "expiration": "2026-11-06"})
+    assert d.passed
+    assert any("RISK-7:earnings_review" in w for w in d.warnings)
+    assert any("2026-10-28" in w and "estimated" in w and "2026-11-06" in w
+               for w in d.warnings)
 
 
 def test_wait_always_passes():

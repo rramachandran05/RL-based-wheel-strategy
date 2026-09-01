@@ -61,22 +61,61 @@ def test_risk5_week_escrow_normalized():
     assert "RISK-5:week_assignment_pct" not in ok.flags
 
 
-def test_risk3_counts_existing_ticker_escrow():
-    # NAV 100k, cap 15%: 10k new + 8k already on this ticker = 18% -> flag
+def test_risk3_potential_exposure_shares_plus_puts():
+    # SPEC-004 §2.2 example scaled: NAV 100k, cap 15%; existing shares 4.5k +
+    # existing puts 1k + proposed 10k = 15.5k -> 15.5% -> reject
     bad = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
-                        RiskConfig(), underlying_escrow=8_000)
+                        RiskConfig(), underlying_exposure=5_500)
     assert "RISK-3:concentration" in bad.flags
     ok = validate_open(_quote(100.0), 1, 1_000_000, 0, 100_000, 0.0, False,
-                       RiskConfig(), underlying_escrow=2_000)
+                       RiskConfig(), underlying_exposure=4_000)
     assert "RISK-3:concentration" not in ok.flags
 
 
-def test_risk8_uses_aggregate_book_escrow():
-    # 100 strike x 100 = 10k notional; escrow already 35k; NAV 100k; cap 40%
-    bad = validate_open(_quote(100.0), 1, 100_000, 0, 100_000,
-                        open_put_escrow=35_000, event_in_window=False,
-                        cfg=RiskConfig())
-    assert "RISK-8:assignment_at_once" in bad.flags
+def test_risk8_assignment_stress_reserve():
+    # SPEC-004 §2.6 example scaled to NAV 500k: stress 125k + proposed put
+    # joins a later week OTM (adds 0 via precomputed value). cash 150k:
+    # (150k - 125k)/500k = 5% < 15% -> reject; cash 250k -> 25% -> pass
+    q = _quote(100.0)
+    bad = validate_open(q, 1, 150_000, 0, 500_000, 0.0, False, RiskConfig(),
+                        stressed_assignment=125_000)
+    assert "RISK-8:stress_reserve" in bad.flags
+    ok = validate_open(q, 1, 250_000, 0, 500_000, 0.0, False, RiskConfig(),
+                       stressed_assignment=125_000)
+    assert "RISK-8:stress_reserve" not in ok.flags
+
+
+def test_risk9_correlation_is_warning_not_block():
+    # SPEC-004 §2.7: corr >= 0.80 surfaces exposures for human review
+    d = validate_open(_quote(100.0), 1, 1_000_000, 0, 1_000_000, 0.0, False,
+                      RiskConfig(),
+                      correlated=[{"ticker": "META", "corr": 0.84,
+                                   "exposure_pct": 0.11},
+                                  {"ticker": "GOOGL", "corr": 0.82,
+                                   "exposure_pct": 0.09}])
+    assert d.passed
+    w = [x for x in d.warnings if "RISK-9:correlation_review" in x]
+    assert w and "META" in w[0] and "0.84" in w[0] and "11%" in w[0]
+
+
+def test_book_stress_and_exposure_helpers():
+    # weeks: W1 = 9/18 (TQQQ 25k + NVDA 19.5k), no W2, so a later put would
+    # be ITM-tested. Build a book with a later ITM put to exercise all legs.
+    book = build_book([
+        _pos("TQQQ", "CSP", 50.0, "2026-09-18", contracts=5),
+        _pos("NVDA", "CSP", 195.0, "2026-09-25"),
+        _pos("META", "CSP", 500.0, "2026-10-30"),   # later; ITM iff spot<=500
+        _pos("MSFT", "CC", 500.0, "2026-09-04", contracts=4),
+    ])
+    spots = {"META": 480.0}                          # 500 >= 480 -> ITM
+    stress = book.stressed_assignment(spots)
+    # 100% x 25k (W1) + 50% x 19.5k (W2) + 100% x 50k (later ITM)
+    assert stress == pytest.approx(25_000 + 9_750 + 50_000)
+    spots_otm = {"META": 520.0}                      # 500 < 520 -> OTM
+    assert book.stressed_assignment(spots_otm) == pytest.approx(34_750)
+    # RISK-3 leg: MSFT CC implies 400 shares; exposure = 400*spot + 0 puts
+    assert book.potential_exposure("MSFT", 500.0) == pytest.approx(200_000)
+    assert book.potential_exposure("TQQQ", 70.0) == pytest.approx(25_000)
 
 
 def test_defaults_keep_simulator_paths_unchanged():
@@ -110,3 +149,17 @@ def test_earnings_in_window_blackout(eps_cfg):
     assert earnings_in_window("AAPL", "2026-11-20", eps_cfg, today="2026-08-30")
     assert not earnings_in_window("AAPL", "2026-09-18", eps_cfg, today="2026-08-30")
     assert not earnings_in_window("NOPE", "2026-11-20", eps_cfg, today="2026-08-30")
+
+
+def test_brief_renders_review_warnings():
+    # SPEC-004 §2.8: warnings render as ⚠ REVIEW plus the full text block
+    from rlbot.assistant.daily import render_brief
+    rec = {"ticker": "META", "date": "2026-08-28", "spot": 578.0,
+           "action": "SELL_PUT", "state_names": ["BULL_LOW_VOL", "FAIR", "POOR"],
+           "contract": {"strike": 500.0, "dte": 30, "delta": -0.2,
+                        "model_premium": 5.0},
+           "review_warnings": ["RISK-7:earnings_review — EARNINGS RISK: ..."]}
+    text = render_brief("2026-08-28", [rec], [], [])
+    assert "SELL_PUT ⚠ REVIEW" in text
+    assert "Human-review warnings" in text
+    assert "RISK-7:earnings_review" in text

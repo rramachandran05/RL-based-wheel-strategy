@@ -104,10 +104,33 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 """
 
 
+def _correlated_exposures(ticker, book, closes, spots, nav, rcfg_risk):
+    """RISK-9 (SPEC-004 §2.7) support data: book underlyings whose trailing
+    corr_lookback-day return correlation with `ticker` ≥ corr_threshold,
+    each with its potential exposure as % NAV."""
+    if not closes or ticker not in closes:
+        return []
+    mine = closes[ticker].pct_change().dropna().tail(rcfg_risk.corr_lookback)
+    hits = []
+    for other in sorted(book.underlyings):
+        if other == ticker or other not in closes:
+            continue
+        theirs = closes[other].pct_change().dropna().tail(rcfg_risk.corr_lookback)
+        joined = pd.concat([mine, theirs], axis=1, join="inner").dropna()
+        if len(joined) < rcfg_risk.corr_lookback // 2:
+            continue
+        corr = joined.corr().iloc[0, 1]
+        if pd.notna(corr) and corr >= rcfg_risk.corr_threshold:
+            hits.append({"ticker": other, "corr": float(corr),
+                         "exposure_pct": book.potential_exposure(
+                             other, spots.get(other)) / nav if nav > 0 else 0})
+    return hits
+
+
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
                       mcb=None, book=None, rcfg=None,
-                      risk_cfg=None) -> dict:
+                      risk_cfg=None, book_spots=None, closes=None) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -156,16 +179,34 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     # Book-level enforcement (2026-08-30): with a book, the whole
     # position set feeds RISK-4/5/8 and the estimated-earnings blackout.
     if book is not None and quote is not None and rcfg is not None:
-        from rlbot.risk.book import earnings_in_window
+        from rlbot.risk.book import earnings_in_window, next_earnings_estimate
+        rk = risk_cfg or RiskConfig()
+        spots = book_spots or {}
+        est = next_earnings_estimate(ticker, rcfg)
+        earnings_info = {
+            "date": str(est.date()) if est is not None else "?",
+            "source": "estimated (last AV reportedDate + ~91d, ±5d window)",
+            "expiration": str(quote.expiration.date()),
+        }
         risk = validate_open(
             quote, 1, cash, 0, cash,
             open_put_escrow=book.put_escrow,
             event_in_window=earnings_in_window(ticker, quote.expiration, rcfg),
-            cfg=risk_cfg or RiskConfig(),          # portfolio-mode caps
+            cfg=rk,                                # portfolio-mode caps
             n_underlyings=book.n_underlyings,
             is_new_underlying=not book.has(ticker),
-            underlying_escrow=book.escrow_for(ticker),
+            underlying_exposure=book.potential_exposure(
+                ticker, spots.get(ticker, out["spot"])),
             same_week_escrow=book.same_week_escrow(quote.expiration),
+            stressed_assignment=book.stressed_assignment(
+                spots, extra_put={"ticker": ticker, "strike": quote.strike,
+                                  "expiration": quote.expiration,
+                                  "escrow": quote.strike * 100},
+                week1_pct=rk.stress_week1_pct, week2_pct=rk.stress_week2_pct,
+                itm_pct=rk.stress_itm_pct),
+            earnings_info=earnings_info,
+            correlated=_correlated_exposures(ticker, book, closes, spots,
+                                             cash, rk),
         )
     else:
         risk = validate_open(quote, 1, cash, 0, cash, 0.0, False,
@@ -196,6 +237,8 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
         out["reason"] = f"risk engine: {risk.flags}"
         return out
     out["action"] = "SELL_PUT"
+    if risk.warnings:      # SPEC-004 §2.8: human-review, never blocking
+        out["review_warnings"] = list(risk.warnings)
     if ceiling is not None:
         out["mcb"]["premium_required"] = round(
             premium_required(quote.strike, ceiling), 2)
@@ -332,12 +375,22 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
         c = r.get("contract") or {}
         v = r.get("mcb") or {}
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
-        lines.append(f"| {name} | {state} | {r['action']} "
+        action = r["action"] + (" ⚠ REVIEW" if r.get("review_warnings") else "")
+        lines.append(f"| {name} | {state} | {action} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
                      f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
                      f"| {v.get('tier', '—')} | {v.get('ceiling', '—')} "
                      f"| {v.get('premium_required', '—')} "
                      f"| {_mcb_flags(v)} |")
+    reviews = [(r["ticker"], w) for r in recs
+               for w in r.get("review_warnings", [])]
+    if reviews:
+        lines += ["", "### ⚠ Human-review warnings (SPEC-004 §2.8 — "
+                      "approve or reject before trading)", ""]
+        for tkr, w in reviews:
+            lines.append(f"> **{tkr}** — {w}")
+            lines.append(">")
+        lines.pop()
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
     if cand_recs:
@@ -418,9 +471,13 @@ def main(argv=None):
     parser.add_argument("--max-week-pct", type=float, default=None,
                         help="RISK-5 same-expiry-week put escrow / NAV ceiling "
                              "(default: RiskConfig's 0.15)")
-    parser.add_argument("--max-escrow-pct", type=float, default=None,
-                        help="RISK-8 total put escrow / NAV ceiling "
-                             "(default: RiskConfig's 0.40)")
+    parser.add_argument("--max-exposure-pct", type=float, default=None,
+                        help="RISK-3 potential exposure per underlying / NAV "
+                             "(shares + puts; default: RiskConfig's 0.15)")
+    parser.add_argument("--min-stress-reserve-pct", type=float, default=None,
+                        help="RISK-8 unencumbered cash / NAV that must remain "
+                             "after the assignment stress (default: "
+                             "RiskConfig's 0.15)")
     parser.add_argument("--positions", type=Path, default=None)
     parser.add_argument("--no-sync-positions", action="store_true",
                         help="skip the Google-Sheet monitor-tab sync")
@@ -529,17 +586,22 @@ def main(argv=None):
         if args.max_underlyings is not None else base_risk.max_underlyings,
         max_week_assignment_pct=args.max_week_pct
         if args.max_week_pct is not None else base_risk.max_week_assignment_pct,
-        max_assignment_at_once=args.max_escrow_pct
-        if args.max_escrow_pct is not None else base_risk.max_assignment_at_once,
+        max_pct_per_underlying=args.max_exposure_pct
+        if args.max_exposure_pct is not None else base_risk.max_pct_per_underlying,
+        min_stress_reserve_pct=args.min_stress_reserve_pct
+        if args.min_stress_reserve_pct is not None
+        else base_risk.min_stress_reserve_pct,
     )
     warnings.append(
-        f"book-level risk active: {book.n_open_positions} positions across "
-        f"{book.n_underlyings} names, ${book.put_escrow:,.0f} put escrow "
-        f"({book.put_escrow / args.cash:.0%} of ${args.cash:,.0f} NAV) — caps: "
-        f"{risk_cfg.max_underlyings} names, "
+        f"book-level risk active (SPEC-004 §2 v2): {book.n_open_positions} "
+        f"positions across {book.n_underlyings} names, "
+        f"${book.put_escrow:,.0f} put escrow "
+        f"({book.put_escrow / args.cash:.0%} of ${args.cash:,.0f} NAV) — "
+        f"hard caps: {risk_cfg.max_underlyings} names, "
         f"week escrow <= {risk_cfg.max_week_assignment_pct:.0%}, "
-        f"per-ticker <= {risk_cfg.max_pct_per_underlying:.0%}, "
-        f"total <= {risk_cfg.max_assignment_at_once:.0%}")
+        f"per-name exposure <= {risk_cfg.max_pct_per_underlying:.0%}, "
+        f"stress reserve >= {risk_cfg.min_stress_reserve_pct:.0%}; "
+        "earnings + correlation surface as ⚠ REVIEW warnings")
     # Cash-secured puts imply NAV >= escrow: floor the NAV assumption so
     # RISK-3/8 ratios are at least coherent, and say so loudly — pass
     # --cash <account NAV> for real checks.
@@ -550,6 +612,19 @@ def main(argv=None):
             "ratios — pass --cash <your account NAV> for meaningful "
             "RISK-3/5/8 enforcement")
         args.cash = book.put_escrow
+
+    # RISK-3/8/9 support data: latest closes for every name the book or the
+    # universe touches (spot marks share exposure and classifies ITM puts;
+    # the close series feed the 120d correlation check).
+    book_spots, closes = {}, {}
+    for t in sorted(set(cfg.assistant_universe) | book.underlyings):
+        try:
+            f = store.frame(t)
+            if not f.empty:
+                book_spots[t] = float(f.iloc[-1]["close"])
+                closes[t] = f["close"]
+        except Exception:
+            continue
 
     recs, guides = [], []
     latest = None
@@ -571,7 +646,8 @@ def main(argv=None):
                                       args.cash, policy=policy, leveraged=lev,
                                       mcb=mcb_rows.get(t),
                                       book=book, rcfg=cfg,
-                                      risk_cfg=risk_cfg))
+                                      risk_cfg=risk_cfg,
+                                      book_spots=book_spots, closes=closes))
     cand_recs = []
     for cand in candidates:
         try:

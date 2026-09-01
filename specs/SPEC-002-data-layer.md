@@ -50,7 +50,7 @@ Implements SPEC-001 §3.1 exactly. Inputs: SPY bars (Tiingo) + VIX daily closes.
 ### 3.5 Vol compensation — `rlbot/features/vol_comp.py`
 Market-level proxy per SPEC-001 §3.1: `vrp = vix_close − 100·spy_realized_vol_20` (both as vol points), plus `vix_pct_5y`. When `options_chain` is populated, per-ticker `iv_pctile` and `iv − rv30` replace the proxy behind the same enum (config switch `vol_comp_source`).
 
-### 3.6 Events — Alpha Vantage forward calendar (vendored `earnings_calendar.py` pattern) for live use. **Historical earnings dates are absent (DATA-GAP-2)**; MVP resolution: `event_risk=false` in the historical era, logged as such, and the risk engine's earnings blackout applies live-only until a historical source is added. Note: the sibling's cached AV pulls are currently returning empty — verify the feed before relying on it.
+### 3.6 Events — Alpha Vantage forward calendar (vendored `earnings_calendar.py` pattern) for live use. **Historical earnings dates are absent (DATA-GAP-2)**; MVP resolution: `event_risk=false` in the historical era, logged as such, and the risk engine's earnings check (a human-review warning since 2026-08-31, SPEC-004 §2.5) applies live-only until a historical source is added. Note: the sibling's cached AV pulls are currently returning empty — verify the feed before relying on it.
 
 ### 3.7 Options chains — `PremiumSource` implementations (consumed by SPEC-003/004)
 - `SyntheticBSPremiumSource` (day one): wraps vendored `options_engine` — `bs_put_price`/`bs_call_price` on `realized_vol_30`, r=0; BS analytic delta (from d1) so delta-tier targeting works without chain data; synthetic "chain" = strike grid at $0.5/$1/$2.5/$5 increments (per spot magnitude) × listed monthly expirations approximated as every Friday in the 25–45 DTE window. Spread model for friction: `spread = max(0.02, spread_pct · premium)` with `spread_pct` calibrated in SPEC-003 §7.
@@ -80,7 +80,7 @@ Default universe (from sibling config): stocks AAPL, AMZN, BRK-B, GOOGL, TSM, MA
 | ID | Gap | MVP resolution | Real resolution |
 |---|---|---|---|
 | DATA-GAP-1 | No historical option chains/IV | Synthetic-BS track + PUT-index calibration gate | **CLOSED 2026-08-22: Alpha Vantage Premium purchased. `HISTORICAL_OPTIONS` (chains + IV + greeks, coverage to 2008) backfilling 2012→present for the 10 training tickers + TQQQ via `rlbot/data/options_ingest.py` (parallel, rate-adaptive, resumable per ticker-year) into `data_local/chains/`. `HistoricalChainPremiumSource` built; selector liquidity floors active on real quotes. Unblocks: real-premium B3 absolutes, per-ticker G1 recalibration, G3 retest with real IV dynamics.** |
-| DATA-GAP-2 | No historical earnings dates | event_risk=false historically; blackout live-only | Historical earnings source (e.g. FMP/AV historical endpoints) |
+| DATA-GAP-2 | No historical earnings dates | event_risk=false historically; earnings review-warning live-only | Historical earnings source (e.g. FMP/AV historical endpoints) |
 | DATA-GAP-3 | No historical valuation series | valuation_state=FAIR historically (inert axis) | FMP historical price-target consensus or manual Morningstar backfill |
 | DATA-GAP-4 | No historical Fear & Greed | Not used; regime is computed from SPY+VIX (reproducible) | n/a — proxy is permanent by design |
 | DATA-GAP-5 | Survivorship: universe is all survivors | Scope claim: policy is conditional on the "willing to own" screen; stated in every evaluation report | Add delisted/cratered names when chain data purchased |

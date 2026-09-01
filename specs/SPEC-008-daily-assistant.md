@@ -9,7 +9,8 @@ One command turns the research system into a daily decision aid:
 ```
 python -m rlbot.assistant.daily [--download] [--cash <account NAV>] \
        [--positions data_local/positions.csv] \
-       [--max-underlyings N] [--max-week-pct F] [--max-escrow-pct F]
+       [--max-underlyings N] [--max-week-pct F] \
+       [--max-exposure-pct F] [--min-stress-reserve-pct F]
 ```
 
 1. `--download`: refresh Alpha Vantage bars/chains (Tiingo fallback) + FRED
@@ -42,7 +43,7 @@ Each run (unless `--no-sync-positions`) fetches the link-shared monitor tab (she
 
 - Premiums and deltas are **model values** (synthetic BS, calibrated to the PUT index at the index level). Always compare against live broker quotes before trading; if the live premium is materially below model, the compensation gate that justified the trade may not hold.
 - Recommendations only — the system never executes. Not investment advice.
-- `--cash` is the **account NAV** the escrow ratios divide by (2026-08-31): risk caps are book-level (SPEC-004 §2.1 normalized rules), and the positions sync runs *before* openings so every recommendation sees the whole book. If NAV < synced put escrow, NAV is floored at escrow with a loud warning — pass the real number.
+- `--cash` is the **account NAV** the escrow ratios divide by (2026-08-31): risk caps are book-level (SPEC-004 §2 v2: hard blocks + ⚠ REVIEW human-review warnings for earnings/correlation), and the positions sync runs *before* openings so every recommendation sees the whole book. If NAV < synced put escrow, NAV is floored at escrow with a loud warning — pass the real number.
 - Bars must be fresh: the brief warns if the latest bar is > 3 trading days old.
 
 ## 3. Requirements & acceptance
