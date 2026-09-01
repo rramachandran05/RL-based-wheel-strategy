@@ -76,3 +76,57 @@ def premium_required(strike: float, ceiling: float | None) -> float | None:
     if ceiling is None:
         return None
     return max(0.0, strike - ceiling)
+
+
+MIN_OPPORTUNITY_ROC = 0.10      # SPEC-011 §6.2: worthwhile-return floor, /yr
+
+
+def opportunity_scan(chain: list, ceiling: float,
+                     min_roc: float = MIN_OPPORTUNITY_ROC,
+                     sel_cfg=None) -> dict | None:
+    """SPEC-011 §6: below-band advisory scan, run only after the normal
+    tier scan found no MCB-compliant candidate.
+
+    Delta describes risk; economics decide worth: among MCB-compliant puts
+    in the DTE window (no delta floor), pick the best annualized return on
+    escrow ROC = premium/(strike−premium) × 365/DTE. Liquidity is reported,
+    not filtered — a poor-liquidity candidate can never be 'attractive'.
+
+    Returns None when NO compliant strike exists in the chain window
+    (geometrically unreachable); else the §6.3 advisory dict. Advisory only:
+    the result is never executable and never enters the decision record.
+    """
+    from rlbot.options.selector import TARGET_DTE, SelectorConfig, _liquid
+    dte_min, dte_max, _ = TARGET_DTE
+    sel_cfg = sel_cfg or SelectorConfig()
+    best = None
+    for q in chain:
+        if q.cp != "P" or not (dte_min <= q.dte <= dte_max):
+            continue
+        net_basis = q.strike - q.mid
+        if net_basis > ceiling + 1e-9 or net_basis <= 0:
+            continue
+        roc_ann = q.mid / net_basis * 365.0 / q.dte
+        if best is None or roc_ann > best["roc_ann"]:
+            liquid_ok = _liquid(q, sel_cfg)
+            best = {
+                "strike": q.strike,
+                "premium": round(q.mid, 2),
+                "net_basis": round(net_basis, 2),
+                "delta": round(abs(q.delta), 4),
+                "dte": q.dte,
+                "roc_ann": round(roc_ann, 4),
+                "oi": q.oi,
+                "spread_pct": round(q.spread_pct, 4)
+                if getattr(q, "spread_pct", None) is not None else None,
+                "liquidity": ("n/a (model quote)" if q.oi is None
+                              else ("acceptable" if liquid_ok else "poor")),
+                "mcb_headroom": round(ceiling - net_basis, 2),
+                "attractive": bool(roc_ann >= min_roc
+                                   and (q.oi is None or liquid_ok)),
+            }
+    if best is not None:
+        best["assessment"] = (
+            "below-band opportunity — HUMAN REVIEW" if best["attractive"]
+            else "economically unattractive — WAIT")
+    return best

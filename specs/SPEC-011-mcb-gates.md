@@ -2,7 +2,7 @@
 
 _Status: implemented v1 — 2026-08-31 (consumer side of `../mcb-wheel`'s
 contract; supersedes SPEC-009 as the live valuation-gate input).
-§6 opportunity scan added 2026-09-01 — **specced, not yet implemented**._
+§6 opportunity scan added and implemented 2026-09-01._
 
 ## 0. Motivation
 
@@ -184,7 +184,7 @@ worthwhile ROC and outcomes (gate **G8**, to be specced alongside G7's
 proxy-ceiling machinery). Until that verdict exists, the advisory never
 feeds `decisions.jsonl` as a chosen action.
 
-### 6.6 Acceptance (planned)
+### 6.6 Acceptance (shipped, tests/test_mcb_gates.py AC-6.1..6.4)
 
 * AC-6.1 Harsh-ceiling fixture on a healthy chain → advisory row with all
   §6.3 metrics; thin premium → "economically unattractive — WAIT".

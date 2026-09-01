@@ -261,3 +261,74 @@ def test_recommend_opening_honors_risk_cfg_override():
                              book=book, rcfg=cfg,
                              risk_cfg=RiskConfig(max_underlyings=30))
     assert "RISK-4" not in rec2.get("reason", "")
+
+
+# ---------------------------------------------------- §6 opportunity scan
+
+def test_ac61_unattractive_advisory_with_metrics():
+    # harsh ceiling, calm vol: compliant strikes exist (the synthetic chain
+    # floors at mid >= $0.01, lowest strike ~80 here) but pay pennies
+    from rlbot.assistant.daily import recommend_opening
+    from rlbot.risk.mcb_gates import opportunity_scan
+    chain = PS.chain(DATE, 100.0, VOL, "P")
+    opp = opportunity_scan(chain, ceiling=85.0)
+    assert opp is not None and not opp["attractive"]
+    for k in ("strike", "premium", "net_basis", "delta", "dte", "roc_ann",
+              "liquidity", "mcb_headroom", "assessment"):
+        assert k in opp
+    assert opp["net_basis"] <= 85.0 + 1e-9
+    assert "unattractive" in opp["assessment"]
+    rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 85.0}))
+    assert rec["action"] == "WAIT"
+    assert "economically unattractive" in rec["reason"]
+    assert rec["mcb"]["opportunity"]["strike"] == opp["strike"]
+    assert "review_warnings" not in rec
+
+
+def _hot_frame():
+    idx = pd.DatetimeIndex([DATE])
+    return pd.DataFrame({"close": [100.0], "market_regime": [0],
+                         "valuation_state": [1], "vol_compensation": [2],
+                         "vol_proxy": [0.85]}, index=idx)
+
+
+def test_ac62_attractive_opportunity_escalates_to_review():
+    # vol spike: a compliant deep-OTM strike now pays real premium
+    from rlbot.assistant.daily import recommend_opening, render_brief
+    rec = recommend_opening("T", _hot_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 70.0}))
+    assert rec["action"] == "WAIT"
+    assert rec["mcb"]["opportunity"]["attractive"]
+    assert rec["mcb"]["opportunity"]["roc_ann"] >= 0.10
+    assert any("MCB-OPP:below_band_opportunity" in w
+               for w in rec["review_warnings"])
+    text = render_brief("2026-08-27", [rec], [], [])
+    assert "WAIT ⚠ REVIEW" in text
+    assert "MCB opportunity scan (advisory" in text
+    assert "Human-review warnings" in text
+
+
+def test_ac63_geometric_vs_economic_reasons_distinct():
+    from rlbot.assistant.daily import recommend_opening, render_brief
+    # ceiling below the whole synthetic strike grid (spot 100, span ±45%)
+    geo = recommend_opening("T", _fake_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 20.0}))
+    eco = recommend_opening("T", _fake_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 85.0}))
+    assert "geometrically unreachable" in geo["reason"]
+    assert "economically unattractive" in eco["reason"]
+    assert geo["reason"] != eco["reason"]
+    text = render_brief("2026-08-27", [geo, eco], [], [])
+    assert "geometrically unreachable" in text
+    assert "economically unattractive" in text
+
+
+def test_ac64_decision_record_unchanged_by_advisory():
+    from rlbot.assistant.daily import decision_record, recommend_opening
+    rec = recommend_opening("T", _hot_frame(), PS, 100_000.0,
+                            mcb=_mcb(mcb={"FAIR": 70.0}))
+    assert rec.get("review_warnings")            # advisory present
+    record = decision_record(rec, 100_000.0, "run-x", 0)
+    assert record["chosen_action"] == 0          # WAIT, unchanged
+    assert record["contract"] is None
