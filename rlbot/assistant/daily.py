@@ -20,7 +20,7 @@ from rlbot.learning.trajectories import validate_record
 from rlbot.options.premium_source import SyntheticBSPremiumSource
 from rlbot.options.selector import SelectorConfig, select_contract
 from rlbot.risk.engine import RiskConfig, validate_open
-from rlbot.risk.mcb_gates import (MIN_OPPORTUNITY_ROC, mcb_ceiling,
+from rlbot.risk.mcb_gates import (LOW_YIELD_ROC, mcb_ceiling,
                                   net_basis_flag, opportunity_scan,
                                   premium_required, reachability_advice,
                                   required_tier, tradeable)
@@ -132,7 +132,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
                       mcb=None, book=None, rcfg=None,
                       risk_cfg=None, book_spots=None, closes=None,
-                      opp_min_roc: float = MIN_OPPORTUNITY_ROC) -> dict:
+                      low_yield_roc: float = LOW_YIELD_ROC) -> dict:
     policy = policy or AdaptiveRulePolicy()
     row = frame.iloc[-1]
     date = frame.index[-1]
@@ -227,37 +227,28 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                     f"needs premium >= "
                     f"{premium_required(ungated.strike, ceiling):.2f}, "
                     f"model {ungated.mid:.2f})")
-                # SPEC-011 §6: below-band advisory scan — delta describes
-                # risk, economics decide worth. Never executable.
-                opp = opportunity_scan(chain, ceiling, min_roc=opp_min_roc)
+                # SPEC-011 §6: below-band advisory scan — the economics are
+                # rendered, the judgment is the user's (2026-09-01: the ROC
+                # threshold is a LOW YIELD flag, never a blocker). Never
+                # executable.
+                opp = opportunity_scan(chain, ceiling,
+                                       low_yield_roc=low_yield_roc)
                 if opp is None:
                     out["reason"] = (head + "; no MCB-compliant strike in "
                                      "the chain window — geometrically "
                                      "unreachable")
                 else:
                     out["mcb"]["opportunity"] = opp
-                    if opp["attractive"]:
-                        out["reason"] = (head + "; below-band opportunity "
-                                         "found — human review")
-                        out.setdefault("review_warnings", []).append(
-                            "MCB-OPP:below_band_opportunity — "
-                            f"{opp['strike']:g} put, {opp['dte']} DTE, "
-                            f"Δ {opp['delta']:.3f}, premium "
-                            f"{opp['premium']:.2f}, net basis "
-                            f"{opp['net_basis']:.2f} (headroom "
-                            f"{opp['mcb_headroom']:.2f} under ceiling "
-                            f"{ceiling:.2f}), annualized ROC on escrow "
-                            f"{opp['roc_ann']:.1%}, liquidity "
-                            f"{opp['liquidity']}. Advisory only (SPEC-011 "
-                            "§6) — outside the RL delta bands; human "
-                            "approval required (APPROVE / REJECT).")
-                    else:
-                        out["reason"] = (
-                            head + "; MCB-compliant strikes exist but are "
-                            "economically unattractive (best: "
-                            f"{opp['strike']:g} put @ {opp['premium']:.2f}, "
-                            f"ROC {opp['roc_ann']:.1%}/yr, liquidity "
-                            f"{opp['liquidity']})")
+                    tags = f" [{', '.join(opp['flags'])}]" if opp["flags"]                         else ""
+                    out["reason"] = (
+                        head + "; below-band MCB-compliant candidate "
+                        "(advisory — user judgment on opportunity cost): "
+                        f"{opp['strike']:g} put, {opp['dte']} DTE, "
+                        f"Δ {opp['delta']:.3f}, premium "
+                        f"{opp['premium']:.2f}, net basis "
+                        f"{opp['net_basis']:.2f} (headroom "
+                        f"{opp['mcb_headroom']:.2f}), ROC on escrow "
+                        f"{opp['roc_ann']:.1%}/yr{tags}")
                 return out
         out["reason"] = "tier unimplementable in current chain window"
         return out
@@ -418,13 +409,15 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
                      f"| {_mcb_flags(v)} |")
     # SPEC-011 §6.4: the scan's outcome must be visible in the brief, with
     # 'geometrically unreachable' and 'economically unattractive' distinct.
-    opps = [(r["ticker"], r["reason"]) for r in recs
+    opps = [(r["ticker"], r["reason"],
+             (r.get("mcb") or {}).get("opportunity")) for r in recs
             if "MCB unreachable within normal delta bands" in r.get("reason", "")]
     if opps:
         lines += ["", "### MCB opportunity scan (advisory — SPEC-011 §6, "
-                      "never executable)", ""]
-        for tkr, reason in opps:
-            lines.append(f"- **{tkr}**: {reason}")
+                      "never executable; opportunity cost is your call)", ""]
+        for tkr, reason, opp in opps:
+            mark = "⚠ " if opp is not None and not opp.get("low_yield") else ""
+            lines.append(f"- {mark}**{tkr}**: {reason}")
     reviews = [(r["ticker"], w) for r in recs
                for w in r.get("review_warnings", [])]
     if reviews:
@@ -521,11 +514,12 @@ def main(argv=None):
                         help="RISK-8 unencumbered cash / NAV that must remain "
                              "after the assignment stress (default: "
                              "RiskConfig's 0.15)")
-    parser.add_argument("--min-opportunity-roc", type=float,
-                        default=MIN_OPPORTUNITY_ROC,
-                        help="SPEC-011 §6 opportunity scan: minimum annualized "
-                             "return on escrow for a below-band MCB-compliant "
-                             "put to escalate to human review (default 0.10)")
+    parser.add_argument("--low-yield-roc", type=float,
+                        default=LOW_YIELD_ROC,
+                        help="SPEC-011 §6 opportunity scan: annualized ROC "
+                             "below which a below-band candidate carries a "
+                             "LOW YIELD flag (decision support, never a "
+                             "blocker; default 0.07)")
     parser.add_argument("--positions", type=Path, default=None)
     parser.add_argument("--no-sync-positions", action="store_true",
                         help="skip the Google-Sheet monitor-tab sync")
@@ -696,7 +690,7 @@ def main(argv=None):
                                       book=book, rcfg=cfg,
                                       risk_cfg=risk_cfg,
                                       book_spots=book_spots, closes=closes,
-                                      opp_min_roc=args.min_opportunity_roc))
+                                      low_yield_roc=args.low_yield_roc))
     cand_recs = []
     for cand in candidates:
         try:

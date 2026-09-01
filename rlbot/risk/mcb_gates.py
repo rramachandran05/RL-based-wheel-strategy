@@ -78,19 +78,23 @@ def premium_required(strike: float, ceiling: float | None) -> float | None:
     return max(0.0, strike - ceiling)
 
 
-MIN_OPPORTUNITY_ROC = 0.10      # SPEC-011 §6.2: worthwhile-return floor, /yr
+LOW_YIELD_ROC = 0.07    # SPEC-011 §6.2: LOW YIELD flag threshold, /yr —
+                        # decision support, never a verdict or blocker
+                        # (user decision 2026-09-01)
 
 
 def opportunity_scan(chain: list, ceiling: float,
-                     min_roc: float = MIN_OPPORTUNITY_ROC,
+                     low_yield_roc: float = LOW_YIELD_ROC,
                      sel_cfg=None) -> dict | None:
     """SPEC-011 §6: below-band advisory scan, run only after the normal
     tier scan found no MCB-compliant candidate.
 
-    Delta describes risk; economics decide worth: among MCB-compliant puts
-    in the DTE window (no delta floor), pick the best annualized return on
-    escrow ROC = premium/(strike−premium) × 365/DTE. Liquidity is reported,
-    not filtered — a poor-liquidity candidate can never be 'attractive'.
+    Delta describes risk; economics inform the human: among MCB-compliant
+    puts in the DTE window (no delta floor), pick the best annualized return
+    on escrow ROC = premium/(strike−premium) × 365/DTE and ALWAYS surface it
+    — the system renders the economics and makes no accept/reject judgment.
+    ROC below low_yield_roc carries a LOW YIELD flag; liquidity is reported,
+    not filtered. Opportunity cost is the user's call.
 
     Returns None when NO compliant strike exists in the chain window
     (geometrically unreachable); else the §6.3 advisory dict. Advisory only:
@@ -122,11 +126,13 @@ def opportunity_scan(chain: list, ceiling: float,
                 "liquidity": ("n/a (model quote)" if q.oi is None
                               else ("acceptable" if liquid_ok else "poor")),
                 "mcb_headroom": round(ceiling - net_basis, 2),
-                "attractive": bool(roc_ann >= min_roc
-                                   and (q.oi is None or liquid_ok)),
+                "low_yield": bool(roc_ann < low_yield_roc),
             }
     if best is not None:
-        best["assessment"] = (
-            "below-band opportunity — HUMAN REVIEW" if best["attractive"]
-            else "economically unattractive — WAIT")
+        flags = []
+        if best["low_yield"]:
+            flags.append(f"LOW YIELD (< {low_yield_roc:.0%}/yr)")
+        if best["liquidity"] == "poor":
+            flags.append("liquidity poor")
+        best["flags"] = flags
     return best

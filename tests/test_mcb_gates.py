@@ -272,16 +272,17 @@ def test_ac61_unattractive_advisory_with_metrics():
     from rlbot.risk.mcb_gates import opportunity_scan
     chain = PS.chain(DATE, 100.0, VOL, "P")
     opp = opportunity_scan(chain, ceiling=85.0)
-    assert opp is not None and not opp["attractive"]
+    assert opp is not None and opp["low_yield"]
     for k in ("strike", "premium", "net_basis", "delta", "dte", "roc_ann",
-              "liquidity", "mcb_headroom", "assessment"):
+              "liquidity", "mcb_headroom", "flags"):
         assert k in opp
     assert opp["net_basis"] <= 85.0 + 1e-9
-    assert "unattractive" in opp["assessment"]
+    assert any("LOW YIELD" in f for f in opp["flags"])
     rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                             mcb=_mcb(mcb={"FAIR": 85.0}))
     assert rec["action"] == "WAIT"
-    assert "economically unattractive" in rec["reason"]
+    # surfaced with the flag — never an accept/reject verdict (2026-09-01)
+    assert "user judgment" in rec["reason"] and "LOW YIELD" in rec["reason"]
     assert rec["mcb"]["opportunity"]["strike"] == opp["strike"]
     assert "review_warnings" not in rec
 
@@ -293,20 +294,20 @@ def _hot_frame():
                          "vol_proxy": [0.85]}, index=idx)
 
 
-def test_ac62_attractive_opportunity_escalates_to_review():
-    # vol spike: a compliant deep-OTM strike now pays real premium
+def test_ac62_healthy_roc_surfaces_without_low_yield_flag():
+    # vol spike: a compliant deep-OTM strike now pays real premium — the
+    # LOW YIELD flag drops away and the brief marks the row worth a look
     from rlbot.assistant.daily import recommend_opening, render_brief
     rec = recommend_opening("T", _hot_frame(), PS, 100_000.0,
                             mcb=_mcb(mcb={"FAIR": 70.0}))
     assert rec["action"] == "WAIT"
-    assert rec["mcb"]["opportunity"]["attractive"]
-    assert rec["mcb"]["opportunity"]["roc_ann"] >= 0.10
-    assert any("MCB-OPP:below_band_opportunity" in w
-               for w in rec["review_warnings"])
+    opp = rec["mcb"]["opportunity"]
+    assert not opp["low_yield"] and opp["roc_ann"] >= 0.07
+    assert not any("LOW YIELD" in f for f in opp["flags"])
+    assert "LOW YIELD" not in rec["reason"]
     text = render_brief("2026-08-27", [rec], [], [])
-    assert "WAIT ⚠ REVIEW" in text
     assert "MCB opportunity scan (advisory" in text
-    assert "Human-review warnings" in text
+    assert "⚠ **T**" in text          # non-low-yield rows are marked
 
 
 def test_ac63_geometric_vs_economic_reasons_distinct():
@@ -317,18 +318,18 @@ def test_ac63_geometric_vs_economic_reasons_distinct():
     eco = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                             mcb=_mcb(mcb={"FAIR": 85.0}))
     assert "geometrically unreachable" in geo["reason"]
-    assert "economically unattractive" in eco["reason"]
+    assert "below-band MCB-compliant candidate" in eco["reason"]
     assert geo["reason"] != eco["reason"]
     text = render_brief("2026-08-27", [geo, eco], [], [])
     assert "geometrically unreachable" in text
-    assert "economically unattractive" in text
+    assert "below-band MCB-compliant candidate" in text
 
 
 def test_ac64_decision_record_unchanged_by_advisory():
     from rlbot.assistant.daily import decision_record, recommend_opening
     rec = recommend_opening("T", _hot_frame(), PS, 100_000.0,
                             mcb=_mcb(mcb={"FAIR": 70.0}))
-    assert rec.get("review_warnings")            # advisory present
+    assert rec["mcb"].get("opportunity")         # advisory present
     record = decision_record(rec, 100_000.0, "run-x", 0)
     assert record["chosen_action"] == 0          # WAIT, unchanged
     assert record["contract"] is None

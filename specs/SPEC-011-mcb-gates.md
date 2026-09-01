@@ -111,8 +111,9 @@ RL action → normal delta-band selector → MCB gate
                      ▼
         MCB_OPPORTUNITY_SCAN (advisory, outside the RL action space)
                      │
-        economics + liquidity ──→ unattractive        → WAIT (with the data)
-                              └─→ potentially attractive → ⚠ HUMAN REVIEW
+        every compliant candidate surfaced with its economics —
+        the USER judges opportunity cost; ROC < 7%/yr carries a
+        LOW YIELD flag (decision support, never a verdict or blocker)
 ```
 
 The scan is **not** the RL policy choosing another action — the frozen
@@ -139,9 +140,12 @@ and only when an MCB ceiling exists for the name:
 
    (the question is not "can I buy AAPL at $200?" but "is someone paying me
    enough to reserve $20K while I wait for that possibility?").
-5. Surface the best candidate **only as an advisory**, classified by a
-   minimum worthwhile-return threshold (`min_opportunity_roc`, default
-   **10%/yr**, config).
+5. Surface the best candidate **always, as an advisory** — the system
+   renders the economics and makes no accept/reject judgment (user decision
+   2026-09-01: the threshold is not a blocker; opportunity cost depends on
+   the situation and belongs to the human). Candidates with ROC below
+   `low_yield_roc` (default **7%/yr**, config / `--low-yield-roc`) carry a
+   **LOW YIELD** flag as decision support.
 
 ### 6.3 Advisory content
 
@@ -157,7 +161,7 @@ The advisory must show enough for the human to judge, not just a strike:
 | Annualized ROC on escrow | Opportunity cost |
 | OI / spread | Executability |
 | MCB headroom | How comfortably below the ceiling |
-| Assessment | **attractive → HUMAN REVIEW** / unattractive → WAIT |
+| LOW YIELD flag (ROC < 7%/yr) | Decision support — never a verdict; the user weighs opportunity cost |
 
 ### 6.4 Two states that were previously collapsed
 
@@ -165,15 +169,15 @@ The scan outcome refines what "unreachable" means in the brief:
 
 * **MCB geometrically unreachable** — no strike/premium combination in the
   chain satisfies the ownership ceiling at all.
-* **MCB reachable but economically unattractive** — a compliant strike
-  exists, but premium/liquidity/ROC is too poor to justify tying up the
-  cash ("MCB-compliant strikes exist, but are not economically tradeable").
+* **MCB reachable, candidate surfaced** — a compliant strike exists; its
+  premium, ROC, and liquidity render in the advisory for the user to judge,
+  with a LOW YIELD flag when ROC < 7%/yr.
 
-Both remain WAIT; the reason string and JSON must distinguish them. In a
-volatility event the same scan flips naturally: the compliant strike's
-premium fattens, ROC clears the threshold, and the row escalates to
-⚠ HUMAN REVIEW — which is exactly when reachability turns and deep-OTM
-selling becomes genuinely interesting.
+Both remain WAIT on the executable side; the reason string and JSON must
+distinguish them. In a volatility event the same scan responds naturally:
+the compliant strike's premium fattens, the LOW YIELD flag drops away, and
+the advisory reads as genuinely interesting — exactly when reachability
+turns and deep-OTM selling starts paying.
 
 ### 6.5 Promotion path (explicitly deferred)
 
@@ -187,10 +191,10 @@ feeds `decisions.jsonl` as a chosen action.
 ### 6.6 Acceptance (shipped, tests/test_mcb_gates.py AC-6.1..6.4)
 
 * AC-6.1 Harsh-ceiling fixture on a healthy chain → advisory row with all
-  §6.3 metrics; thin premium → "economically unattractive — WAIT".
-* AC-6.2 Elevated-IV fixture (compliant strike pays ≥ threshold) →
-  "below-band opportunity — HUMAN REVIEW" and the brief renders it under
-  the human-review section.
+  §6.3 metrics; thin premium → surfaced with the LOW YIELD flag, no verdict.
+* AC-6.2 Elevated-IV fixture (compliant strike pays ≥ 7%/yr) → surfaced
+  without the LOW YIELD flag; the brief renders it in the opportunity-scan
+  section marked as worth a look.
 * AC-6.3 No compliant strike in the whole chain → "geometrically
   unreachable"; the two reason strings are distinct in JSON and brief.
 * AC-6.4 The RL decision record is unchanged in all cases (WAIT, action 0);
