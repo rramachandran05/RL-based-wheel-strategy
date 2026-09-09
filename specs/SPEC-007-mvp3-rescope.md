@@ -86,6 +86,32 @@ drawdown-ATTRACTIVE. Fail ⇒ the axis stays logged-only; pass ⇒ it becomes
 a candidate for the live Q-state only after a separate review of the
 value-trap risk, since "cheaper than it was" is not "cheaper than it is worth".
 
+**G9 VERDICT (run 2026-09-09): FAILED.** Pooled test differential vs B3
+**−0.26%/yr** (F1 −0.39%, F2 −0.13%); both return criteria missed; all
+three risk criteria passed (drawdown ratio ≤ 1.1×, no regime segment
+lagging 2 pts, A/B halves non-negative) — the same "indistinguishable to
+slightly worse, not riskier" shape as every prior axis. Coverage 28/36 (F1)
+and 29/36 (F2): zero historical gap in the *signal*, but the empty cells
+are rare regime × vol-comp combinations, so the axis does not populate more
+of the table than the EPS proxy did (30/36). Ranking of the four axis
+variants by pooled test differential: EPS proxy −0.04% > original FV axis
+−0.21% > **drawdown −0.26%** > trend −0.74%.
+
+**Pre-registered value-trap check: the failure mode appeared exactly where
+predicted.** In the F1 test window (2022–23, the bear), drawdown-ATTRACTIVE
+entries were the *worst* bucket — n=277, mean differential reward
+−0.0022/decision, 70% of decisions lost — versus FAIR −0.00013 and
+EXPENSIVE −0.00004. In F2 (2024–26) the same bucket was positive (+0.0019,
+n=53). Read: buying the deep correction works in a recovery and buys falling
+knives in a bear. "Cheaper than it was" is not "cheaper than it is worth."
+**Disposition: the axis stays logged-only; it is not a live Q-state
+candidate.** The opening-decision question is now settled four times in
+favor of the rule table. (Note for SPEC-011 rule 6, which also reads
+drawdown: there it is a *score* input bounded by the producer's own dd50/dd90
+history, and its relief notch is already withheld in BEAR_STRESS — the fold
+where this check failed. Unaffected by this verdict, but the same caution
+applies.)
+
 ## 4. Explicitly deferred (from original MVP-3)
 HMM regime model, GARCH volatility, adaptive Q-blending, trend/momentum state promotion, ICRL. Reconsider only after G3 and G2-rerun verdicts exist.
 

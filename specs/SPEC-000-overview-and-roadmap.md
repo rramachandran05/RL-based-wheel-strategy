@@ -1,6 +1,6 @@
 # SPEC-000 — Overview, Roadmap, and Spec Index
 
-_Status: living doc — v1 2026-08-21, last reconciled with the code 2026-08-31_
+_Status: living doc — v1 2026-08-21, last reconciled with the code 2026-09-09_
 _Parent doc: [APPROACH.md](../APPROACH.md)_
 
 ## 1. What this project is
@@ -9,9 +9,9 @@ An event-driven, hierarchical RL system for the options wheel strategy. An RL po
 
 **Falsifiable claim:** the learned policy must beat a simple rule-based adaptive wheel (Baseline 3) out-of-sample, or the learning layer is not justified. Steps before that gate produce a useful rule-driven assistant regardless.
 
-**Where it landed (2026-08-31):** every learning gate failed honestly — G2,
-G2-rerun, and the trend ablation for openings; G3 and its real-chain retest
-for management. The falsifiable claim is falsified for this state space, and
+**Where it landed (2026-09-09):** every learning gate failed honestly — G2,
+G2-rerun, the trend ablation and the drawdown-axis ablation (G9) for
+openings; G3 and its real-chain retest for management. The falsifiable claim is falsified for this state space, and
 the fallback deliverable is the production system: a **rule-driven daily
 assistant** (B3 openings + hold-to-expiry + selector + book-level risk
 engine + SPEC-011 MCB gates), running weekdays 06:00 CT via LaunchAgent,
@@ -106,7 +106,7 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 > **Risk engine v2 (2026-08-31, SPEC-004 §2):** two-tier disposition — hard blocks (RISK-1/2/3/4/5/6/8) vs human-review warnings (RISK-7 earnings, RISK-9 correlation, rendered as ⚠ REVIEW with full supporting text); RISK-3 became potential exposure (CC-implied shares + existing puts + proposed put ≤ 15% NAV); RISK-8 became the assignment-stress liquidity reserve (100% W1 + 50% W2 + 100% later-ITM puts, then cash − stress ≥ 15% NAV) replacing the blanket 40%-escrow cap.
 > **B3 absolutes corrected after the dynamic-contract-sizing fix** (`data_local/reports/b3_performance_historical.json`, supersedes the 2026-08-23 figures above): Full 2013–2026 **+29.0% CAGR / −42.8% maxDD** ($100K→$3.19M); Test-1 2022–23 +9.2%/−17.2%; Test-2 2024–26 +15.5%/−13.6%. Microstructure sensitivity ±1–2 pts/yr; ~$50K minimum viable capital, validated config ~$100K+. **⚠ Superseded — see 2026-09-09 below.**
 > **Operations:** LaunchAgent weekdays 06:00 CT (`scripts/run_daily.sh`, installed under `~/Library/Application Support/wheel-rlbot/`); momentum monitor Sat 07:00; AV Premium is the primary data vendor (bars/chains/EPS, paced sequential requests), Tiingo fallback. Test suite: 204.
-> **Open items:** G6 (leveraged-ETF technical anchors — reframed by MCB's ETF zones), G7 (retrospective net-basis-gate A/B with proxy ceilings), G8 (below-band opportunity backtest gating any executable promotion of the SPEC-011 §6 advisory scan, implemented 2026-09-01), **G9 (drawdown-percentile valuation axis, SPEC-007 §3C — harness built 2026-09-09, verdict pending)**, fallback-share gating in evaluations, lockfile/CI/README reproducibility, bootstrap CIs.
+> **Open items:** G6 (leveraged-ETF technical anchors — reframed by MCB's ETF zones), G7 (retrospective net-basis-gate A/B with proxy ceilings), G8 (below-band opportunity backtest gating any executable promotion of the SPEC-011 §6 advisory scan, implemented 2026-09-01), fallback-share gating in evaluations, lockfile/CI/README reproducibility, bootstrap CIs.
 
 > **B3 rebaselined 2026-09-09 — a silent staleness, not a new regression.** The Aug 30 selector fix (VolPremium/SpreadCost "actually wired" on real quotes, cd7a3cd — declared in SPEC-004 since MVP-1 but dead code until then) was never re-run against the real-chain B3 backtest: the historical report on disk predated that fix by a week, so every "+29.0%/$3.19M" figure quoted since then was computed with the pre-fix, incomplete formula. Rerun with the fix actually exercised — **CURRENT, authoritative figures:**
 > - Full 2013–2026: **+10.5% CAGR / −26.5% maxDD** ($100K→$389K)
@@ -118,6 +118,8 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 > Drawdown *improved* in every window for both B3 and B1 under the corrected formula (the spread-cost penalty now avoids illiquid wide-spread contracts; the vol-premium reward now favors genuinely elevated IV instead of chasing raw yield) at the cost of CAGR — a real, economically coherent risk/return shift, not breakage. One qualitative change: in the Full window B3's drawdown (−26.5%) is now marginally worse than B1's (−24.6%), flipping the prior ordering; B3 still holds the better drawdown in both shorter test windows, and still delivers roughly half of buy-and-hold's drawdown at proportionally lower CAGR — the same qualitative trade-off as before, just at corrected magnitude. None of this session's MCB v2 or risk-engine v2 work caused it or is implicated by it (verified: neither reaches a single-ticker backtest — `RiskConfig.single_ticker()` neutralizes every book-level rule; MCB has no historical data path).
 >
 > **Process lesson, now a standing rule: rerun `python -m rlbot.evaluation.b3_performance --historical` after any change to real-quote scoring, selection, or execution logic — not only after risk-engine, gate, or state-axis changes.** A fix can be correct and silently invalidate the last backtest until someone happens to ask.
+
+> **G9 (drawdown-percentile valuation axis, SPEC-007 §3C, 2026-09-09): FAILED — the fourth axis variant to lose to the rule table.** Pooled test −0.26%/yr (F1 −0.39%, F2 −0.13%); return criteria missed, risk criteria passed; coverage 28–29/36. The pre-registered value-trap check fired exactly where predicted: in the 2022–23 bear fold, drawdown-ATTRACTIVE entries were the worst bucket (n=277, −0.0022/decision, 70% losers) while the same bucket was positive in the 2024–26 fold — "buy the deep correction" works in a recovery and buys falling knives in a bear. Axis ranking by pooled differential: EPS proxy −0.04% > FV −0.21% > drawdown −0.26% > trend −0.74%. **Disposition: logged-only, not a Q-state candidate; the opening-decision question is settled four times over.** Verdict + segmentation: `data_local/reports/ablation_drawdown_verdict.json`.
 
 **MVP 4 — ICRL.** Only reconsidered after the G3 and G2-rerun verdicts exist. _(Both now exist and failed; ICRL additionally needs a fundamentally richer state/signal — e.g. real-IV dynamics — before it is worth reopening.)_
 
