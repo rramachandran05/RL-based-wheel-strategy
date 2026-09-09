@@ -91,6 +91,44 @@ def mcb_binding(row: McbRow | None, action, downtrend: bool = False) -> tuple:
     return ceiling, False            # CONSERVATIVE or unknown -> advisory
 
 
+def mcb_valuation_state(row: McbRow | None, market_regime: int):
+    """SPEC-011 §2 rule 6 / SPEC-004 §1.2: the ValuationState fed to the
+    selector's assignment-penalty multiplier — replacing the Google-Sheet
+    FV anchor in that role. Combines MCB position (drop_needed: how far spot
+    sits above wheel_entry) with drawdown severity judged against the
+    ticker's own correction history (dd50/dd75/dd90) and the regime:
+
+        drop_needed ≤ dd50          -> ATTRACTIVE  (entry within a typical correction)
+        dd50 < drop_needed ≤ dd90   -> FAIR
+        drop_needed > dd90          -> EXPENSIVE   (needs a beyond-90th-pct correction)
+        relief notch: dd_now ≥ dd75 and regime != BEAR_STRESS -> one step
+        less penalizing (a severe correction is already underway; not
+        granted in a stressed market where it may continue)
+        any input missing           -> FAIR (constraint absent -> neutral)
+
+    Score-only: the frozen Q-state axis the policy conditions on is untouched,
+    and backtests (no MCB history) never reach this function.
+    """
+    from rlbot.state.enums import ValuationState
+    if row is None:
+        return ValuationState.FAIR
+    dn, d50, d90 = row.drop_needed, row.dd50, row.dd90
+    if dn is None or d50 is None or d90 is None:
+        return ValuationState.FAIR
+    if dn <= d50:
+        state = ValuationState.ATTRACTIVE
+    elif dn <= d90:
+        state = ValuationState.FAIR
+    else:
+        state = ValuationState.EXPENSIVE
+    relief = (row.dd_now is not None and row.dd75 is not None
+              and row.dd_now >= row.dd75
+              and int(market_regime) != int(MarketRegime.BEAR_STRESS))
+    if relief and state != ValuationState.ATTRACTIVE:
+        state = ValuationState(int(state) - 1)
+    return state
+
+
 def is_downtrend(structure: str | None) -> bool:
     """SPEC-011 §2 rule 1 trend override input: classify_structure's label
     for today (vendored technicals.py; computed daily, previously

@@ -46,6 +46,46 @@ Failing G3 is again a legitimate outcome: it would say hold-to-expiry is adequat
 ### 3.2 GATE G2-rerun
 Re-run the unmodified SPEC-005/006 opening-policy pipeline with the proxy-populated valuation axis. Pass criteria identical to G2. Prediction to test: state coverage rises from 10 toward ~30 of 36 cells.
 
+## 3C. Track C — drawdown-percentile valuation proxy (added 2026-09-09; APPROACH.md §5)
+
+### 3C.1 Motivation
+Track B (§3) narrowed DATA-GAP-3 but still leaves the valuation axis
+dependent on fundamentals that are absent or unreliable for ETFs and
+partially covered for stocks. Per-ticker drawdown from the running high
+(`underlying.drawdown`, SPEC-002 §2) exists for **every ticker on every day
+back to 2013 — zero historical gap** — and is the price-position signal
+the trend-axis ablation only approximated through SMA-crossover structure.
+The trend ablation was the worst of the three axis variants (−0.74%/yr
+pooled), so a related price-position idea is **not assumed to succeed**;
+it earns its way in through the same gate or it does not ship.
+
+### 3C.2 Construction
+- Input: `drawdown = close / cummax(close) − 1` (causal, already materialized).
+- `dd_pct(t)` = right-inclusive rolling 5-year percentile (1260 bars, min
+  252 obs) of the ticker's **own** drawdown series — not a fixed % band,
+  since a stock that routinely swings ±30% needs different bands than one
+  that rarely moves. Mirrors Track B's percentile approach exactly.
+- Mapping to the frozen enum (no SPEC-001 change): `dd_pct < 0.20 →
+  ATTRACTIVE` (drawdown in the worst fifth of its own history — a deep
+  correction), `dd_pct > 0.80 → EXPENSIVE` (at/near highs), else `FAIR`.
+  Warmup (< 252 obs) → NA → state undefined, as today.
+- Implementation: `rlbot/features/valuation.py::classify_drawdown_series`;
+  ablation harness `rlbot/evaluation/ablation_drawdown.py` (a FrameStore
+  wrapper overwriting `valuation_state`, byte-identical to
+  `ablation_trend.py` in every other respect).
+
+### 3C.3 GATE G9 — drawdown axis
+Byte-identical B3 pipeline, same folds, same estimator/LCB/promotion
+criteria as G2-rerun and the trend ablation; only the valuation axis is
+swapped. Verdict JSON: `data_local/reports/ablation_drawdown_verdict.json`.
+Pass criteria identical to G2. **Pre-registered failure mode to inspect
+regardless of verdict:** does the learned table buy into names that keep
+falling (deep-drawdown ATTRACTIVE → aggressive tier → further decline)?
+Segment test-period losses by whether the entry state was
+drawdown-ATTRACTIVE. Fail ⇒ the axis stays logged-only; pass ⇒ it becomes
+a candidate for the live Q-state only after a separate review of the
+value-trap risk, since "cheaper than it was" is not "cheaper than it is worth".
+
 ## 4. Explicitly deferred (from original MVP-3)
 HMM regime model, GARCH volatility, adaptive Q-blending, trend/momentum state promotion, ICRL. Reconsider only after G3 and G2-rerun verdicts exist.
 

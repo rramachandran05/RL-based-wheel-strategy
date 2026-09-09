@@ -27,6 +27,18 @@ Score = w1·PremiumYield + w2·VolPremium − w3·SpreadCost − w4·DownsideRis
 
 `valuation_multiplier`: ATTRACTIVE → 0.25, FAIR/unknown → 1.0, EXPENSIVE → 2.0 (config). This is where valuation shapes behavior without being a hard constraint — an attractive stock makes assignment cheap; an expensive one makes it costly.
 
+**Which valuation state feeds the multiplier (revised 2026-09-09, APPROACH.md §7):** the Google-Sheet FV anchor is retired from this role. In the live assistant the state is derived from the MCB report — `mcb_valuation_state(row, market_regime)` in `rlbot/risk/mcb_gates.py`, SPEC-011 §2 rule 6 — combining **MCB position** (`drop_needed`, how far spot sits above `wheel_entry`) with **drawdown severity judged against the ticker's own correction history** (`dd_now` vs the producer's `dd50/dd75/dd90`) and the market regime:
+
+| Condition | State fed to the multiplier |
+|---|---|
+| `drop_needed ≤ dd50` — entry reachable within a typical correction | ATTRACTIVE |
+| `dd50 < drop_needed ≤ dd90` | FAIR |
+| `drop_needed > dd90` — entry needs a beyond-90th-percentile correction | EXPENSIVE |
+| Relief notch: `dd_now ≥ dd75` (a severe correction is already underway) **and** regime ≠ BEAR_STRESS | one step less penalizing (EXPENSIVE→FAIR, FAIR→ATTRACTIVE) — not granted in a stressed market, where the correction may continue |
+| Any input missing | FAIR (constraint absent → neutral, house philosophy) |
+
+This changes **only the selector's score** (which strike wins within the chosen band). The frozen Q-state `valuation_state` that the policy conditions on is untouched (SPEC-001), and backtests — which have no MCB history — continue to score on the FV/EPS axis, so no G-series verdict moves. Initial mapping; to be tested like the weights.
+
 Ties: highest premium wins; then nearest DTE to 30. Weights are config, logged into every run's manifest; they are engineering parameters, not learned.
 
 ### 1.3 Degradation

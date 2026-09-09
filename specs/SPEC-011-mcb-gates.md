@@ -93,12 +93,20 @@ absent" default (G6 remains open for technical anchors on top).
    not-validated note.
 5. **Staleness** — a report older than 5 trading sessions is expired: gates
    no-op entirely with a warning (constraint absent, never a stale ceiling).
+6. **Scoring input (2026-09-09)** — the selector's assignment-penalty
+   multiplier (SPEC-004 §1.2) is fed by `mcb_valuation_state(row,
+   market_regime)`: ATTRACTIVE when `drop_needed ≤ dd50`, EXPENSIVE when
+   `drop_needed > dd90`, else FAIR; one notch of relief when `dd_now ≥
+   dd75` outside BEAR_STRESS; FAIR when any input is missing. This retires
+   the Google-Sheet FV anchor from the score. It does **not** touch the
+   frozen Q-state axis the policy conditions on, nor any backtest.
 
 ## 3. Implementation map
 
 | Piece | Module | Notes |
 |---|---|---|
 | Loader | `rlbot/data/mcb_feed.py` | PIT-safe (files ≤ as_of only); NaN rows → absent + warning; `DataConfig.mcb_dir`; **v2**: parses `wheel_entry`, `delta_posture`, `dd_now`, `drop_needed`, `action`, `shadow_min_tier` |
+| Scoring input | `rlbot/risk/mcb_gates.py::mcb_valuation_state` | rule 6: MCB position + drawdown severity → ValuationState for the selector's assignment penalty (live only; `dd50/75/90`, `dd_now`, `drop_needed` parsed by the loader) |
 | Posture/ceiling/masks | `rlbot/risk/mcb_gates.py` | **v2**: `mcb_binding(row, action, trend_structure)` → (`ceiling`, `hard: bool`) replaces the old unconditional `required_tier`/`mcb_ceiling`; `tradeable`, `reachability_advice`, `net_basis_flag` (MCB-1), `premium_required` unchanged |
 | Trend overlay | `rlbot/assistant/daily.py` (reads `underlying.structure`, already computed) | Pullback-in-Uptrend / Breakdown forces conservative-or-wait regardless of `delta_posture` |
 | Selector pre-filter | `rlbot/options/selector.py` | `net_basis_ceiling=` kwarg now optional per-tier (`None` when the gate is advisory for the chosen tier); puts only; empty list → None → WAIT |

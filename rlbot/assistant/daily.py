@@ -21,9 +21,9 @@ from rlbot.options.premium_source import SyntheticBSPremiumSource
 from rlbot.options.selector import SelectorConfig, select_contract
 from rlbot.risk.engine import RiskConfig, validate_open
 from rlbot.risk.mcb_gates import (LOW_YIELD_ROC, is_downtrend, mcb_binding,
-                                  net_basis_flag, opportunity_scan,
-                                  premium_required, reachability_advice,
-                                  tradeable)
+                                  mcb_valuation_state, net_basis_flag,
+                                  opportunity_scan, premium_required,
+                                  reachability_advice, tradeable)
 from rlbot.simulator.portfolio import ExecutionConfig
 from rlbot.state.encoder import encode_q_state
 from rlbot.state.enums import CashAction, PositionState, legal_actions
@@ -101,7 +101,7 @@ LEGEND = """## Legend
 
 The Δ column is the selected contract's actual delta (≈ assignment probability); DTE targets 25–45 days. Leveraged ETFs (3x) cap at BALANCED and always WAIT in stress.
 
-**MCB gates (mcb-wheel v2, 2026-09-09) — an aggressiveness pivot, not a uniform rejection boundary.** `wheel_entry` is the net cost basis (strike − premium) comfortable to acquire at. The producer publishes a `Posture` per ticker: **CONSERVATIVE** (far above entry, rising/sideways) — the ceiling is advisory only, since a conservative-delta put here is a low-probability income trade, not an acquisition attempt; **HIGHER** (at/near entry) — the ceiling is hard, always, since assignment is welcome and sought; **MODERATE** (entry reachable via a typical correction) — hard only for BALANCED-and-up tiers, advisory for income tiers (WAIT/DEFENSIVE/CONSERVATIVE), the one case the producer leaves to us. `(hard)` next to the posture in the table means the ceiling actually filtered this trade. **A confirmed downtrend overrides all of this to conservative-or-wait** — "don't catch a falling knife" — since the producer computes no trend signal; this repo supplies it. `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability remains a separate, informational signal (`UNREACHABLE`/`PATIENCE`), unrelated to Posture. Open CSPs are flagged only when the ceiling was/would be hard for them; the call side is governed by cost-basis discipline (calls never sold below basis), since MCB is acquisition-side only. A report older than 5 trading sessions is expired and disables all of this (warning shown).
+**MCB gates (mcb-wheel v2, 2026-09-09) — an aggressiveness pivot, not a uniform rejection boundary.** `wheel_entry` is the net cost basis (strike − premium) comfortable to acquire at. The producer publishes a `Posture` per ticker: **CONSERVATIVE** (far above entry, rising/sideways) — the ceiling is advisory only, since a conservative-delta put here is a low-probability income trade, not an acquisition attempt; **HIGHER** (at/near entry) — the ceiling is hard, always, since assignment is welcome and sought; **MODERATE** (entry reachable via a typical correction) — hard only for BALANCED-and-up tiers, advisory for income tiers (WAIT/DEFENSIVE/CONSERVATIVE), the one case the producer leaves to us. `(hard)` next to the posture in the table means the ceiling actually filtered this trade. **A confirmed downtrend overrides all of this to conservative-or-wait** — "don't catch a falling knife" — since the producer computes no trend signal; this repo supplies it. `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability remains a separate, informational signal (`UNREACHABLE`/`PATIENCE`), unrelated to Posture. Open CSPs are flagged only when the ceiling was/would be hard for them; the call side is governed by cost-basis discipline (calls never sold below basis), since MCB is acquisition-side only. **The selector's assignment penalty is also MCB-fed** (`score_valuation` in the JSON): ATTRACTIVE when entry is within the ticker's typical correction (`drop_needed ≤ dd50`), EXPENSIVE when it needs a beyond-90th-percentile correction, one notch of relief when a severe correction is already underway outside a stressed market — this replaces the Google-Sheet FV anchor in the score only; the State column's valuation (the policy's input) is unchanged. A report older than 5 trading sessions is expired and disables all of this (warning shown).
 
 **Position guidance.** HOLD to expiration is the validated default (rolling on margin-of-safety triggers tested 1.2–2.3%/yr worse). Flags are attention signals: `BREACHED` = option in the money; `challenged` = |delta| ≥ 0.40; `expiry week` = ≤ 7 days left. A breached covered call at/above your cost basis is the wheel's intended profit-taking exit, not a failure.
 """
@@ -172,6 +172,13 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     # CONSERVATIVE-posture ceiling, or a MODERATE-posture ceiling on an
     # income tier, is advisory and must not touch the selector at all.
     binding_ceiling = ceiling if hard else None
+    # Score-side valuation (SPEC-011 §2 rule 6 / SPEC-004 §1.2): the
+    # assignment-penalty multiplier is fed by MCB position + drawdown
+    # severity, not the FV-sheet axis. The policy's Q-state q[1] is untouched.
+    score_val = q[1]
+    if mcb is not None:
+        score_val = int(mcb_valuation_state(mcb, q[0]))
+        out["mcb"]["score_valuation"] = VAL_NAMES[score_val]
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
@@ -183,7 +190,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
         out["mcb"]["advisory"] = advice
     vol = float(row["vol_proxy"])
     chain = ps.chain(date, out["spot"], vol, "P")
-    quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
+    quote, n_cands = select_contract(action, chain, out["spot"], vol, score_val,
                                      cfg=SelectorConfig(),
                                      net_basis_ceiling=binding_ceiling)
     # Book-level enforcement (2026-08-30): with a book, the whole
@@ -228,7 +235,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
         # they can't have caused an empty scan), and only if dropping it
         # would have produced a contract (else it's chain/liquidity).
         if binding_ceiling is not None:
-            ungated, _ = select_contract(action, chain, out["spot"], vol, q[1],
+            ungated, _ = select_contract(action, chain, out["spot"], vol, score_val,
                                          cfg=SelectorConfig())
             if ungated is not None:
                 head = (

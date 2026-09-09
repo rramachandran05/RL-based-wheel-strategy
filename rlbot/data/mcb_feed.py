@@ -44,6 +44,11 @@ class McbRow:
     drop_needed: float | None = None       # (spot - wheel_entry) / spot
     action: str | None = None              # producer advisory label
     shadow_min_tier: str | None = None     # old guardrail tier, calibration only
+    # correction-history percentiles (drawdown from trailing high) — feed the
+    # score-side valuation state (SPEC-011 §2 rule 6) with dd_now/drop_needed
+    dd50: float | None = None
+    dd75: float | None = None
+    dd90: float | None = None
 
     def ceiling(self, tier: str) -> float | None:
         return self.mcb.get(tier)
@@ -53,6 +58,11 @@ def mcb_dir(cfg: RlbotConfig | None = None) -> Path:
     if cfg is not None and hasattr(cfg.data, "mcb_dir"):
         return Path(cfg.data.mcb_dir)
     return MCB_DIR
+
+
+def _f(v) -> float | None:
+    """Nullable float from a CSV cell (NaN/None -> None)."""
+    return float(v) if v is not None and pd.notna(v) else None
 
 
 def load_mcb(cfg: RlbotConfig | None = None, as_of=None) -> tuple:
@@ -108,6 +118,9 @@ def load_mcb(cfg: RlbotConfig | None = None, as_of=None) -> tuple:
             drop_needed=float(getattr(r, "drop_needed", None)) if pd.notna(getattr(r, "drop_needed", None)) else None,
             action=str(getattr(r, "action", None)) if pd.notna(getattr(r, "action", None)) else None,
             shadow_min_tier=str(shadow_tier) if pd.notna(shadow_tier) and str(shadow_tier) in TIERS else None,
+            dd50=_f(getattr(r, "dd50", None)),
+            dd75=_f(getattr(r, "dd75", None)),
+            dd90=_f(getattr(r, "dd90", None)),
         )
         if wheel_entry is None or pd.isna(wheel_entry):
             warnings.append(f"{ticker}: no wheel_entry (v2 schema) — "
