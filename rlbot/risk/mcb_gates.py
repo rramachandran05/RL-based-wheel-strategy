@@ -1,14 +1,35 @@
-"""MCB-based put gates (2026-08-30) — the consumer side of mcb-wheel's
-contract, replacing the Wheel-FV gates as the live valuation constraint.
+"""MCB-based put gates — the consumer side of mcb-wheel's contract,
+replacing the Wheel-FV gates as the live valuation constraint.
 
-The tier constraint is HARD and not learnable (contract rule 1); the
-reachability handling is the contract's *recommended* reading (rule 2),
-implemented as default behavior behind honor_reachability.
+v2 (SPEC-011 §2 rule 1, 2026-09-09): MCB is an aggressiveness pivot, not a
+uniform rejection boundary. A trending, compounding stock can be safely
+sold at conservative delta far above its comfortable acquisition price —
+assignment there is a low-probability tail event, not the trade's purpose.
+Bindingness now scales with the producer's per-ticker `delta_posture`:
+CONSERVATIVE never blocks, HIGHER always blocks, MODERATE is resolved by
+our own tier split (0.10-0.18Δ boundary, already frozen by SPEC-001). A
+confirmed downtrend overrides all of this to conservative-or-wait — the
+producer computes no trend, so that override is ours alone to apply.
+
+The layer_a mask (never trade MONITOR_ONLY/HALT) and reachability handling
+are unchanged from v1.
 """
 from __future__ import annotations
 
 from rlbot.data.mcb_feed import TIERS, McbRow
-from rlbot.state.enums import MarketRegime, VolCompensation
+from rlbot.state.enums import CashAction, MarketRegime, VolCompensation
+
+# SPEC-011 §2 rule 1: downtrend structures that override delta_posture to
+# conservative-or-wait ("don't catch a falling knife"). Matches the vendored
+# classify_structure labels (rlbot/vendor/technicals.py), already computed
+# per-day in the underlying table (features/technicals_series.py) and
+# logged-only until now (APPROACH.md §5).
+DOWNTREND_STRUCTURES = {"Pullback in Uptrend", "Breakdown"}
+
+# Our own tier split resolving the producer's ambiguous MODERATE case
+# (SPEC-011 §2 rule 1): income tiers stay advisory, acquisition tiers hard.
+ACQUISITION_TIERS = {CashAction.PUT_BALANCED, CashAction.PUT_AGGRESSIVE,
+                     CashAction.PUT_VERY_AGGRESSIVE}
 
 # Consumer regime posture (contract rule 1: "defensive -> at least
 # ATTRACTIVE"): calm bull is non-defensive; everything else is defensive.
@@ -32,10 +53,50 @@ def required_tier(row: McbRow, market_regime: int) -> str:
 
 
 def mcb_ceiling(row: McbRow | None, market_regime: int) -> float | None:
-    """The hard net-basis ceiling, or None (constraint absent)."""
+    """The v1-era ceiling (deeper-of tier). Retained for callers that don't
+    yet pass an action/trend context; superseded live by mcb_binding()."""
     if row is None:
         return None
     return row.ceiling(required_tier(row, market_regime))
+
+
+def mcb_binding(row: McbRow | None, action, downtrend: bool = False) -> tuple:
+    """SPEC-011 §2 rule 1 (v2): (ceiling, hard) for the given put action.
+
+    ceiling = row.wheel_entry — None means constraint absent (no v1
+    fallback: an older-schema row with no wheel_entry gates nothing rather
+    than guessing at a different anchor; mcb_feed.py warns on this).
+    hard = whether that ceiling actually blocks a trade at this action:
+
+      - downtrend=True             -> hard, always ("don't catch a falling
+        knife" overrides delta_posture; ours to apply, the producer computes
+        no trend).
+      - delta_posture == HIGHER    -> hard, always (acquisition sought).
+      - delta_posture == MODERATE  -> hard only for BALANCED-and-up actions
+        (our own tier split resolves the producer's one ambiguous case).
+      - delta_posture == CONSERVATIVE, or missing -> never hard (advisory).
+    """
+    if row is None:
+        return None, False
+    ceiling = row.wheel_entry
+    if ceiling is None:
+        return None, False           # constraint absent, never guessed
+    if downtrend:
+        return ceiling, True
+    posture = row.delta_posture
+    if posture == "HIGHER":
+        return ceiling, True
+    if posture == "MODERATE":
+        return ceiling, action in ACQUISITION_TIERS
+    return ceiling, False            # CONSERVATIVE or unknown -> advisory
+
+
+def is_downtrend(structure: str | None) -> bool:
+    """SPEC-011 §2 rule 1 trend override input: classify_structure's label
+    for today (vendored technicals.py; computed daily, previously
+    logged-only per APPROACH.md §5). None (warmup/missing) -> not a
+    confirmed downtrend, never guessed into one."""
+    return structure in DOWNTREND_STRUCTURES
 
 
 def tradeable(row: McbRow | None) -> tuple:

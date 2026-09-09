@@ -50,11 +50,19 @@ def _write_report(tmp_path, rows, date="2026-08-27"):
 
 
 def _mcb(**kw):
+    # v2 default: HIGHER posture (hard, unconditional) so tests written
+    # against the old always-hard ceiling keep behaving the same way unless
+    # a test explicitly asks for CONSERVATIVE/MODERATE. wheel_entry tracks
+    # mcb["FAIR"] by default (the pre-v2 convention for "the ceiling") so
+    # existing `_mcb(mcb={"FAIR": X})` calls keep meaning "ceiling = X".
     base = dict(ticker="T", date="2026-08-27",
                 mcb={"FAIR": 90.0, "ATTRACTIVE": 85.0, "EXCELLENT": 80.0},
                 min_eligible_tier="FAIR", guardrail="NORMAL", layer_a="OWN",
-                reachability="NORMAL", confidence=0.8)
+                reachability="NORMAL", confidence=0.8,
+                delta_posture="HIGHER")
     base.update(kw)
+    if "wheel_entry" not in kw:
+        base["wheel_entry"] = base["mcb"].get("FAIR")
     return McbRow(**base)
 
 
@@ -187,7 +195,7 @@ def test_recommend_opening_mcb_blocks_and_annotates():
                              mcb=_mcb(mcb={"FAIR": 95.0}))
     if rec4["action"] == "SELL_PUT":
         c, v = rec4["contract"], rec4["mcb"]
-        assert v["tier"] == "FAIR"
+        assert v["posture"] == "HIGHER"
         assert c["strike"] - c["model_premium"] <= v["ceiling"] + 0.01
         assert v["premium_required"] == pytest.approx(
             max(0.0, c["strike"] - v["ceiling"]), abs=0.01)
@@ -201,7 +209,7 @@ def test_render_brief_includes_mcb_columns():
     rec = recommend_opening("T", _fake_frame(), PS, 100_000.0,
                             mcb=_mcb(layer_a="HALT", guardrail="SEVERE"))
     text = render_brief("2026-08-27", [rec], [], [])
-    assert "MCB tier" in text and "Prem req" in text
+    assert "Posture" in text and "Prem req" in text
     assert "HALT" in text
     assert "Maximum Comfortable Basis" in text        # note + legend
 
@@ -333,3 +341,107 @@ def test_ac64_decision_record_unchanged_by_advisory():
     record = decision_record(rec, 100_000.0, "run-x", 0)
     assert record["chosen_action"] == 0          # WAIT, unchanged
     assert record["contract"] is None
+
+
+# ------------------------------------------------------- v2 aggressiveness pivot
+
+def test_mcb_binding_conservative_never_hard():
+    from rlbot.risk.mcb_gates import mcb_binding
+    from rlbot.state.enums import CashAction
+    row = _mcb(delta_posture="CONSERVATIVE", wheel_entry=90.0)
+    for a in (CashAction.PUT_DEFENSIVE, CashAction.PUT_CONSERVATIVE,
+             CashAction.PUT_BALANCED, CashAction.PUT_VERY_AGGRESSIVE):
+        ceil, hard = mcb_binding(row, a)
+        assert ceil == 90.0 and not hard
+
+
+def test_mcb_binding_higher_always_hard():
+    from rlbot.risk.mcb_gates import mcb_binding
+    from rlbot.state.enums import CashAction
+    row = _mcb(delta_posture="HIGHER", wheel_entry=90.0)
+    for a in (CashAction.PUT_DEFENSIVE, CashAction.PUT_VERY_AGGRESSIVE):
+        ceil, hard = mcb_binding(row, a)
+        assert ceil == 90.0 and hard
+
+
+def test_mcb_binding_moderate_splits_by_tier():
+    from rlbot.risk.mcb_gates import mcb_binding
+    from rlbot.state.enums import CashAction
+    row = _mcb(delta_posture="MODERATE", wheel_entry=90.0)
+    for a in (CashAction.PUT_DEFENSIVE, CashAction.PUT_CONSERVATIVE):
+        assert mcb_binding(row, a) == (90.0, False)
+    for a in (CashAction.PUT_BALANCED, CashAction.PUT_AGGRESSIVE,
+             CashAction.PUT_VERY_AGGRESSIVE):
+        assert mcb_binding(row, a) == (90.0, True)
+
+
+def test_mcb_binding_downtrend_overrides_everything():
+    from rlbot.risk.mcb_gates import mcb_binding
+    from rlbot.state.enums import CashAction
+    row = _mcb(delta_posture="CONSERVATIVE", wheel_entry=90.0)
+    ceil, hard = mcb_binding(row, CashAction.PUT_DEFENSIVE, downtrend=True)
+    assert ceil == 90.0 and hard   # downtrend beats even CONSERVATIVE posture
+
+
+def test_mcb_binding_missing_wheel_entry_is_absent():
+    from rlbot.risk.mcb_gates import mcb_binding
+    from rlbot.state.enums import CashAction
+    row = _mcb(delta_posture="HIGHER", wheel_entry=None)
+    assert mcb_binding(row, CashAction.PUT_BALANCED) == (None, False)
+    assert mcb_binding(None, CashAction.PUT_BALANCED) == (None, False)
+
+
+def test_is_downtrend():
+    from rlbot.risk.mcb_gates import is_downtrend
+    assert is_downtrend("Breakdown")
+    assert is_downtrend("Pullback in Uptrend")
+    assert not is_downtrend("Bull Trend")
+    assert not is_downtrend("Recovery")
+    assert not is_downtrend(None)
+
+
+def test_conservative_posture_conservative_tier_trades_unblocked():
+    """The actual bug report this redesign fixes: AAPL-style far-above-entry,
+    conservative-delta trades must NOT be blanket-blocked anymore."""
+    from rlbot.assistant.daily import recommend_opening
+    row = _mcb(delta_posture="CONSERVATIVE", wheel_entry=60.0,
+              mcb={"FAIR": 60.0})   # spot 100 in _fake_frame, ceiling far below
+    rec = recommend_opening("T", _fake_frame(), PS, 100_000.0, mcb=row)
+    assert rec["action"] == "SELL_PUT"
+    assert rec["mcb"]["hard"] is False
+    # net basis is legitimately above wheel_entry — that's the point
+    assert rec["contract"]["strike"] - rec["contract"]["model_premium"] > 60.0
+
+
+def test_moderate_posture_conservative_tier_unblocked_balanced_blocked():
+    from rlbot.assistant.daily import recommend_opening
+    from rlbot.benchmarks.policies import AdaptiveRulePolicy
+    row = _mcb(delta_posture="MODERATE", wheel_entry=60.0, mcb={"FAIR": 60.0})
+
+    class _ForceConservative:
+        def decide(self, pos, q, row_):
+            return CashAction.PUT_CONSERVATIVE
+
+    class _ForceBalanced:
+        def decide(self, pos, q, row_):
+            return CashAction.PUT_BALANCED
+
+    rec_c = recommend_opening("T", _fake_frame(), PS, 100_000.0, mcb=row,
+                              policy=_ForceConservative())
+    rec_b = recommend_opening("T", _fake_frame(), PS, 100_000.0, mcb=row,
+                              policy=_ForceBalanced())
+    assert rec_c["action"] == "SELL_PUT" and rec_c["mcb"]["hard"] is False
+    assert rec_b["action"] == "WAIT" and rec_b["mcb"]["hard"] is True
+
+
+def test_downtrend_forces_wait_even_in_higher_posture():
+    from rlbot.assistant.daily import recommend_opening
+    idx = pd.DatetimeIndex([DATE])
+    frame = pd.DataFrame({"close": [100.0], "market_regime": [0],
+                          "valuation_state": [1], "vol_compensation": [1],
+                          "vol_proxy": [VOL], "structure": ["Breakdown"]},
+                         index=idx)
+    row = _mcb(delta_posture="HIGHER", wheel_entry=60.0, mcb={"FAIR": 60.0})
+    rec = recommend_opening("T", frame, PS, 100_000.0, mcb=row)
+    assert rec["mcb"]["downtrend_override"] is True
+    assert rec["mcb"]["hard"] is True

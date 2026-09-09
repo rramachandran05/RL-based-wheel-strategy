@@ -81,7 +81,7 @@ Default universe (from sibling config): stocks AAPL, AMZN, BRK-B, GOOGL, TSM, MA
 |---|---|---|---|
 | DATA-GAP-1 | No historical option chains/IV | Synthetic-BS track + PUT-index calibration gate | **CLOSED 2026-08-22: Alpha Vantage Premium purchased. `HISTORICAL_OPTIONS` (chains + IV + greeks, coverage to 2008) backfilling 2012→present for the 10 training tickers + TQQQ via `rlbot/data/options_ingest.py` (parallel, rate-adaptive, resumable per ticker-year) into `data_local/chains/`. `HistoricalChainPremiumSource` built; selector liquidity floors active on real quotes. Unblocks: real-premium B3 absolutes, per-ticker G1 recalibration, G3 retest with real IV dynamics.** |
 | DATA-GAP-2 | No historical earnings dates | event_risk=false historically; earnings review-warning live-only | Historical earnings source (e.g. FMP/AV historical endpoints) |
-| DATA-GAP-3 | No historical valuation series | valuation_state=FAIR historically (inert axis) | FMP historical price-target consensus or manual Morningstar backfill |
+| DATA-GAP-3 | No historical valuation series | valuation_state=FAIR historically (inert axis) | FMP historical price-target consensus, manual Morningstar backfill, **or drawdown-percentile proxy (queued ablation, APPROACH.md §5, 2026-09-09) — zero historical gap, not yet gated/adopted** |
 | DATA-GAP-4 | No historical Fear & Greed | Not used; regime is computed from SPY+VIX (reproducible) | n/a — proxy is permanent by design |
 | DATA-GAP-5 | Survivorship: universe is all survivors | Scope claim: policy is conditional on the "willing to own" screen; stated in every evaluation report | Add delisted/cratered names when chain data purchased |
 

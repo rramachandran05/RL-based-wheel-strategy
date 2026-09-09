@@ -1,14 +1,24 @@
 # Wheel-Strategy RL Bot — Overall Approach
 
 _Revision 2 — 2026-08-21. Incorporates the review-round changes: counterfactual sweep training, differential reward, hard state-space reduction with pessimistic offline learning, data reality checks, and a risk-reordered MVP. Supersedes the v1 approach text._
+_Revision 3 — 2026-09-09. Plain-language pass; MCB v2 (delta_posture aggressiveness pivot) replaces the FV-sheet valuation signal in the selector's score; current-status honesty note added._
+
+**A wheel-trading bot that, given market conditions, learns how much risk to take while maximizing premium — while fixed rules handle contract selection and safety.**
+
+> **Current status (see SPEC-000 for the full record):** every learning gate run to date (G2, G2-rerun, the trend-axis ablation, G3, G3-retest) has failed to beat the rule-based baseline out-of-sample. The system described below as the target design is **not what's running in production today** — the live daily assistant is 100% rule-based (Baseline 3 + deterministic selector + hard risk engine), with zero learned Q-tables deployed. Learning is paused, not abandoned: MVP-4 stays open pending a materially new signal (real-IV dynamics, a validated state axis, etc.), and every trajectory is still logged so a future retry starts from real data. Treat §§8–10 below as the design this repo is built to support, not a status report.
 
 ---
 
 ## 1. Philosophy
 
-The strategy seeks to continuously monetize option premium when sufficiently compensated for risk. It adjusts strike selection dynamically according to the desirability and probability of assignment rather than restricting put sales to preferred acquisition prices. Favorable conditions permit more aggressive strikes and greater assignment exposure; unfavorable conditions progressively reduce assignment exposure by moving strikes farther out of the money. No-trade (WAIT) remains an available action when even conservative strikes do not provide adequate compensation for risk.
+**The bot asks: "Is the premium worth the risk, and how much risk should I accept?"** When conditions look favorable, it can sell options with a greater chance of assignment in exchange for more premium. When conditions look worse, it becomes more conservative — or does nothing.
 
-**The central design choice: the policy decides a risk budget, not a contract.** Instead of asking the model for a strike, the RL policy answers "how much assignment risk am I willing to take right now?" A deterministic option-selection engine then converts that risk budget into delta → strike → DTE → premium, and a hard risk engine validates the result. RL proposes; the risk engine disposes.
+The key separation:
+- **The learning model chooses a risk level.**
+- **A fixed algorithm chooses the actual option contract.**
+- **A risk engine decides whether the trade is allowed.**
+
+The model cannot freely invent trades or override limits.
 
 ```
 Keep the Wheel working when the market is paying enough for the risk,
@@ -22,7 +32,14 @@ Extreme conditions → wait.
 
 ## 2. The Wheel as an Explicit State Machine
 
-Built before any RL. The portfolio exists in four primary states, each with its own permitted actions — this prevents the agent from ever proposing a mechanically invalid action.
+Built before any RL. The wheel moves through four stages:
+
+1. **Cash** — you have money available and can sell a cash-secured put.
+2. **Short put** — you have promised to buy shares at the strike if assigned.
+3. **Long stock** — assignment has left you owning shares; you can sell a covered call.
+4. **Covered call** — you own shares and have promised to sell them at the strike if assigned.
+
+Each state has its own permitted actions — this prevents the agent from ever proposing a mechanically invalid move.
 
 ```
 CASH
@@ -49,7 +66,15 @@ COVERED_CALL
 
 ## 3. Sequential Decision Logic
 
-At each **decision epoch** (see §8 — not every day):
+At each **decision epoch** (§8 — not every day), the bot first checks what it owns and whether the stock is still suitable, then evaluates the market, valuation, option premiums, and upcoming risks. Those checks lead to a risk posture and a possible trade.
+
+Four ideas matter most:
+- **A high chance of profit is insufficient** — a small premium can still come with a large potential loss.
+- **Rolling is not automatic** — replacing an existing option with another must improve the situation, not merely postpone recognizing a loss.
+- **Covered calls have an opportunity cost** — collecting premium can mean missing a large stock rally.
+- **Each completed cycle requires a fresh decision** — selling the shares does not automatically trigger another put.
+
+The full ordered checklist:
 
 1. **Portfolio state.** Cash, shares, open short put, or open covered call — determines available actions.
 2. **Suitability gate.** Underlying still a company the investor is willing to own; option liquidity acceptable; assignment would not create unacceptable concentration. If not suitable, stop initiating new Wheel trades.
@@ -72,20 +97,18 @@ At each **decision epoch** (see §8 — not every day):
 ## 4. Architecture
 
 ```
-Data → Features → Market/Stock State → Wheel Position State
-     → RL Policy → Assignment/Call-Away Risk Budget
-     → Deterministic Contract Selector → Risk Engine (hard constraints)
-     → Recommendation (+ LLM explanation) → Outcome → Learning
+Data → assessment of conditions → risk choice → contract selection
+     → safety checks → explanation → outcome tracking
 ```
 
-Separate Q-functions per position state — never one giant table:
+A **Q-function** is a scorecard estimating how useful an action is in a particular situation. The design uses separate scorecards for cash, open puts, owned stock, and open calls, because those situations involve different decisions:
 
 - `Q_cash(state, action)` — cash policy
 - `Q_put(state, action)` — short-put management
 - `Q_stock(state, action)` — stock policy
 - `Q_call(state, action)` — covered-call management
 
-The MVP trains only `Q_cash` and `Q_stock`; put/call management uses fixed rules until Phase 2.
+The MVP trains only `Q_cash` and `Q_stock`; put/call management uses fixed rules until Phase 2. **As of this revision, none of these tables are live in production** (see the status note at the top) — the rule-based B3 policy plays every role.
 
 ---
 
@@ -106,6 +129,8 @@ state = (market_regime, valuation_state, volatility_compensation)
 
 Trend, momentum, event risk, and concentration are **computed and logged in every trajectory record from day one** but excluded from the MVP Q-state. They earn their way in only via ablations showing they add value. Event risk and concentration act through the risk engine (§11) instead, where hard rules are more appropriate than learned behavior anyway.
 
+**Candidate axis, queued — not yet run (2026-09-09):** `valuation_state` is inert for nearly all of training history (no historical FV series exists; see DATA-GAP-3, §12), defaulting to FAIR almost everywhere. A drawdown-percentile proxy is a candidate replacement that has zero historical gap: `classify_drawdown_series`, thresholds set by the *rolling percentile of the ticker's own drawdown distribution* (not a fixed %, since a stock that routinely swings ±30% needs different bands than one that rarely moves) — mirroring the EPS-proxy's percentile approach rather than the fixed 5% band. To be tested via the same ablation protocol as G2-rerun and the trend-axis ablation: byte-identical B3 pipeline, same test windows, only the valuation axis swapped. Not adopted until it clears that gate — the trend-axis ablation already failed worse than the EPS proxy, so a related price-position idea is not assumed to succeed by default.
+
 Management states (Phase 2) add position fields: DTE, current delta, distance to strike, % premium captured, unrealized P&L.
 
 Categorical encodings, not raw numbers: never feed $103.72 fair value or a raw SMA into a Q-table.
@@ -114,7 +139,9 @@ Categorical encodings, not raw numbers: never feed $103.72 fair value or a raw S
 
 ## 6. Action Space — Risk Budgets, Not Contracts
 
-Actions are assignment-risk tiers (cash side) and call-away-risk tiers (stock side). The action space stays fixed while actual strikes change daily.
+Instead of choosing among thousands of options, the model chooses a category: **Wait → defensive → conservative → balanced → aggressive.**
+
+For puts, those categories map to delta ranges — delta acts as a rough indicator of exposure and assignment likelihood, not an exact assignment probability. The put ranges use delta's magnitude:
 
 | Cash action | Approx. put delta |
 |---|---|
@@ -124,6 +151,8 @@ Actions are assignment-risk tiers (cash side) and call-away-risk tiers (stock si
 | PUT_BALANCED | 0.18–0.25 |
 | PUT_AGGRESSIVE | 0.25–0.35 |
 | PUT_VERY_AGGRESSIVE | 0.35–0.45 |
+
+For covered calls, the categories determine how close the strike is to the current stock price — farther away generally preserves more upside; closer generally collects more premium but makes selling the shares more likely. "Defensive" on the call side mainly means less call-away risk; it does not mean strong protection against a stock-price decline.
 
 | Stock action | Posture |
 |---|---|
@@ -139,51 +168,65 @@ Delta ranges are initial engineering parameters, not strategy rules — the poli
 
 ## 7. Deterministic Contract Selector
 
-Given a risk tier (e.g., PUT_CONSERVATIVE → delta 0.10–0.18, DTE 25–45), filter the chain (right type, delta in range, DTE in range, volume, open interest, bid/ask spread), then score candidates:
+Once the model chooses a risk category, a conventional algorithm finds the best qualifying option: filter for expiration, delta, liquidity, and trading costs, then score the remaining contracts.
 
 ```
 Score = w1·PremiumYield + w2·VolatilityPremium
       − w3·SpreadCost − w4·DownsideRisk − w5·AssignmentPenalty
 ```
 
-The assignment penalty scales inversely with valuation attractiveness: an attractive stock makes assignment cheap to accept; an expensive one makes it costly. This is where valuation shapes behavior without being a hard constraint.
+The scoring weights are design choices that still need to be specified and tested.
+
+**Valuation input to the score (revised 2026-09-09 — the Google Sheet FV anchor is retired from this role): the assignment penalty is driven by MCB position and drawdown severity, not the sheet's fair-value distance.** If the stock sits near or below its Maximum Comfortable Basis (`wheel_entry`), assignment receives a smaller penalty — you're being paid to acquire something you already consider fairly priced. If it sits far above `wheel_entry` with no correction underway, the same assignment exposure receives a larger penalty. The exact mapping (how `drop_needed` / `dd_now` combine into a multiplier) is a design detail still to be specified and tested — same status as the scoring weights above.
+
+**MCB acquisition ceiling — an aggressiveness pivot, not a uniform rejection boundary (mcb-wheel producer contract v2, 2026-09-09).** The old rule ("no put may ever be sold above the MCB ceiling, regardless of tier") is **wrong for a trending, compounding stock** — a stock can be safely sold at conservative delta far above its comfortable acquisition price, because assignment there is a low-probability tail event, not the trade's purpose. The producer now publishes `delta_posture` per ticker (CONSERVATIVE / MODERATE / HIGHER), computed from the stock's own valuation and drawdown distance:
+
+| `delta_posture` | Situation | MCB ceiling treatment |
+|---|---|---|
+| CONSERVATIVE | Far above entry, rising or sideways | Advisory only — never blocks. Conservative-delta puts with net basis above the ceiling are legitimate here: assignment is neither sought nor likely. |
+| MODERATE | Entry reachable through a typical correction | Hard for our BALANCED-and-up tiers (assignment-seeking); advisory for WAIT/DEFENSIVE/CONSERVATIVE tiers (income-only) — the one case the producer leaves to us to resolve. |
+| HIGHER | At/near entry, or at its typical correction level, stable or rising | Hard, always — assignment is welcome and actively sought here. |
+
+**One override belongs to us, not the producer: a strong downtrend forces conservative-or-wait regardless of posture** ("don't catch a falling knife"). The producer computes no trend signal; this repo overlays its own (`classify_structure` — Bull Trend / Recovery / Base / Pullback / Breakdown, already computed and logged per §5, previously unused for this purpose).
 
 ---
 
 ## 8. Decision Epochs — a Semi-MDP
 
-No pointless daily trades. The policy is called at **decision events**:
+No pointless daily trades. The bot makes decisions at meaningful events rather than trading simply because another day has passed:
 
 - no option currently open
-- option reaches an expiry threshold or profit target
+- **an option approaches expiration, or a profit target is reached** — two distinct triggers, not one
 - delta changes materially / underlying crosses strike
 - regime or volatility-regime change
 - earnings approaches
 
-Between epochs the position simply rides. Rewards are aggregated over the inter-decision window. **Within a cycle, γ = 1** — with 20–45-day horizons, per-day discounting buys nothing and adds a tuning knob; keep it simple.
+"Semi-MDP" means the time between decisions can vary. Between epochs the position simply rides; rewards are aggregated over the inter-decision window. **Within a cycle, later rewards get the same weight as earlier ones (γ = 1)** — with 20–45-day horizons, per-day discounting buys nothing and adds a tuning knob to avoid.
 
 ---
 
 ## 9. Reward — Differential, Not Raw NAV
 
-Raw NAV-change reward in LONG_STOCK is dominated by the stock's drift: the table would learn "stocks go up in bull regimes" — true and useless. **The reward is the policy's NAV change minus a reference policy's NAV change over the same window:**
+**NAV** means the portfolio's total net value. Raw NAV-change reward in LONG_STOCK is dominated by the stock's drift: the table would learn "stocks go up in bull regimes" — true and useless. The bot is instead rewarded for doing better than a named reference strategy over the same window:
 
 ```
-r = ΔNAV(policy) − ΔNAV(reference)     over the same inter-decision window
+Reward = bot's change in value − reference strategy's change in value
 ```
 
-- **Reference in cash states:** a fixed 20-delta wheel.
-- **Reference in stock states:** buy-and-hold.
+- **Reference in cash states: a fixed 20-delta wheel.**
+- **Reference in stock states: buy-and-hold.**
 
-This isolates the decision's contribution to wealth, and covered-call opportunity cost falls out automatically — a capped rally shows up as negative differential reward with no special accounting. The evaluation baselines (§14) serve double duty as reward references.
+Examples:
+- Bot gains $800; reference gains $500 → reward is +$300.
+- Bot gains $800; reference gains $1,200 → reward is −$400.
 
-Costs (commissions, slippage) are charged inside each leg's NAV path. Drawdown/tail-risk penalty terms are deferred until the simple differential reward is demonstrably insufficient — complex rewards are easy to optimize incorrectly.
+This isolates the decision's contribution to wealth, and covered-call opportunity cost falls out automatically — a capped rally shows up as negative differential reward with no special accounting. The evaluation baselines (§14) serve double duty as reward references. Costs (commissions, slippage) are charged inside each leg's NAV path. Drawdown/tail-risk penalty terms are deferred until the simple differential reward is demonstrably insufficient — complex rewards are easy to optimize incorrectly.
 
 ---
 
 ## 10. Learning — Counterfactual Sweep First, Q-Learning Second
 
-**The environment is exogenous: our actions never move option prices or the underlying.** So at every decision epoch we do not have to choose one action and observe one outcome — we can simulate *all* actions against the same historical path and observe each one's realized outcome. This converts bandit feedback into full-information feedback, multiplies sample efficiency by roughly the action-space size, and eliminates the exploration/exploitation problem for the offline phase entirely. No epsilon-greedy in offline training.
+**The central idea: the environment is exogenous — our actions never move option prices or the underlying — so at every historical decision point we can simulate every available action against the same path and compare the outcomes,** instead of picking one and observing only its result. This converts bandit feedback into full-information feedback and eliminates the offline exploration/exploitation problem entirely.
 
 ```python
 def counterfactual_sweep(epoch, chain, actions, simulate_to_next_epoch, baseline_value):
@@ -196,7 +239,7 @@ def counterfactual_sweep(epoch, chain, actions, simulate_to_next_epoch, baseline
     return results   # supervised targets for ALL actions at this state
 ```
 
-Because different actions branch portfolio state (assigned vs. not), each branch is simulated **only to the next decision epoch**, then closed with a baseline continuation value (fixed-rule wheel from the branch's end state) instead of expanding a full tree. With full action feedback, learning largely collapses into **per-state regression over observed action returns** — simpler and more stable than TD bootstrapping, and visitation counts become real per-action counts.
+Because different actions branch portfolio state (assigned vs. not), each branch is simulated **only to the next decision epoch**, then closed with a baseline continuation value (fixed-rule wheel from the branch's end state) instead of expanding a full tree. With full action feedback, learning largely collapses into per-state regression over observed action returns — simpler and more stable than TD bootstrapping.
 
 Guards against offline-RL failure modes:
 
@@ -214,13 +257,10 @@ Per Q-entry bookkeeping: Q value, observation count, average return, return vari
 
 ## 11. Hard Risk Engine — Not Learnable, Not Bypassable
 
-Some decisions never depend on Q-learning:
+These are rules the model cannot override: sufficient cash for put assignment, owning shares before selling calls, position limits, acceptable liquidity, and event restrictions.
 
-- No naked calls; cash-secured puts only (cash sufficient for assignment)
-- Max position size; max ticker concentration; max simultaneous positions
-- Min option liquidity; max bid/ask spread
-- Configurable event policies (e.g., earnings blackout)
-- **Portfolio-level synchronized-assignment constraint:** the wheel's true tail risk is every short put assigning in the same crash week. That is inherently invisible to per-ticker Q-tables and lives permanently here as a portfolio-level cap on aggregate assignment-at-once exposure — it is never something to learn.
+- **Spread exposure across tickers, strikes, and expiration dates** — no more than **15% of NAV** in potential exposure to a single underlying (shares plus open puts), no more than 12 distinct active names, no more than 15% of NAV in put escrow expiring in any one ISO week.
+- **MCB acquisition ceiling remains hard for acquisition-intent situations** (producer `delta_posture = HIGHER`, or our own BALANCED-and-up tiers within MODERATE) — a non-bypassable limit alongside the exposure caps above. It is deliberately **not** universal; see §7 for the full aggressiveness-pivot split and why a uniform ceiling was wrong.
 
 ```
 RL recommends → Risk engine validates → allowed: contract recommendation
@@ -231,44 +271,47 @@ RL recommends → Risk engine validates → allowed: contract recommendation
 
 ## 12. Data Plan and Reality Checks
 
-Canonical daily historical snapshots sufficient to recreate what would have been known on each date: market table (SPY, SMAs, VIX, breadth, realized vol), underlying table (OHLCV, returns, drawdown, SMAs, RSI, momentum, realized vol), valuation table (ingest the existing wheel-strategy fair-value signal — do not build a second valuation model), **historical options-chain table** (the critical dataset: per snapshot date × expiration × strike: bid/ask/mid, IV, greeks, OI, volume), events table, portfolio-state table.
+Canonical daily historical snapshots sufficient to recreate what would have been known on each date: market table (SPY, SMAs, VIX, breadth, realized vol), underlying table (OHLCV, returns, drawdown, SMAs, RSI, momentum, realized vol), valuation table, historical options-chain table (per snapshot date × expiration × strike: bid/ask/mid, IV, greeks, OI, volume), events table, portfolio-state table.
 
-**Code-review finding (2026-08-21):** the existing `wheel-strategy` repo contains **no option-chain data at all** — every premium it produces, live and backtested, is Black-Scholes synthetic on a 30-day realized-vol proxy with r=0. The RL project therefore defines a `PremiumSource` interface with two implementations: **synthetic-BS** (available day one, reusing `options_engine.py`, known conservative bias) and **historical-chain** (when data is acquired). The simulator, policy, and trajectory schema are identical across both; only premium/greeks provenance changes. The PUT-index calibration gate is what keeps the synthetic track honest.
+**Alpha Vantage premium is the primary data vendor** (bars, historical + daily option chains, quarterly EPS), with Tiingo as fallback — closing what was originally the project's single biggest data gap.
 
-| Item | Issue | Decision |
+| Item | Issue | Status |
 |---|---|---|
-| Historical option chains | The critical path and main cost | Theta Data or ORATS (affordable tiers); OptionMetrics is academic-grade but pricey. Start with SPY + 5–10 liquid mega-caps. Until purchased: synthetic-BS track |
-| Fear & Greed history | No long official CNN history | Build a reproducible proxy composite (VIX percentile, put/call ratio, breadth) usable in walk-forward |
-| Survivorship bias | Training only on NOW/MSFT/META — survivors — overstates aggressive-put value | Include delisted/cratered names where feasible; otherwise explicitly scope the policy as conditional on the "willing to own" screen and state so in every evaluation |
-| Simulator correctness | How do we know the simulator itself is right? | **Calibration gate:** run a fixed-delta SPY wheel through the simulator and compare against the CBOE PUT index — free external ground truth. Required test before any learning begins |
-| HMM regimes (later phase) | Refitting per walk-forward step causes regime-label switching, silently breaking Q-state identity | Rule-based regimes for MVP. If HMM later: train only through time t (no look-ahead), enforce label ordering by volatility |
-| GARCH (later phase) | Complexity before it's earned | Defer; MVP uses IV percentile + realized-vol spread for volatility compensation |
+| Historical option chains | The critical path and main cost | **Closed 2026-08-22:** Alpha Vantage Premium purchased; 34M rows backfilled 2012→present, 11 tickers + leveraged-ETF era |
+| Fear & Greed history | No long official CNN history | Reproducible proxy composite (VIX percentile, put/call ratio, breadth) |
+| No historical valuation series | Analyst-consensus FV only exists from 2026-07-26 forward | `valuation_state = FAIR` historically (declared limitation, §5); drawdown-percentile proxy queued as a candidate replacement |
+| No historical earnings dates | — | Estimated live-only (last reported + ~91d, ±5d), surfaced as a human-review warning, never a blackout |
+| Survivorship bias | Training only on survivors overstates aggressive-put value | Scoped explicitly as conditional on the "willing to own" screen; stated in every evaluation report |
+| Simulator correctness | How do we know the simulator itself is right? | **Calibration gate:** fixed-delta SPY wheel vs. the CBOE PUT index — required before any learning begins |
+| HMM / GARCH regimes | Complexity before it's earned | Deferred; rule-based regimes and IV-percentile/realized-vol spread cover the MVP |
 
 ---
 
 ## 13. Simulator
 
-Event-driven backtesting environment. Episode: start with cash (e.g., $100,000), no stock, no option; run the wheel 6–12 months.
+The simulator recreates trading over historical periods. It must include:
 
-- **Execution friction:** never assume mid fills. `Fill = Mid − k·(Ask−Bid)` when selling; reverse when buying to close. Plus commissions and fees.
-- **Daily mark-to-market:** `NAV = cash + shares·price − short_option_liability`. A deteriorating short put shows as a loss before assignment.
-- **Expiration/assignment mechanics:** put ITM at expiry → assign (cash −= strike×100, shares += 100, cost basis = strike − premium received, SHORT_PUT → LONG_STOCK); call ITM → called away (COVERED_CALL → CASH). Expiration-only assignment for MVP; early exercise, ex-dividend effects, and corporate actions later.
-- **Walk-forward only — never randomly split time series.** Every computed quantity (valuation, IV percentile, SMAs, regimes, earnings knowledge) uses only information available at that historical date.
+- **Realistic execution costs** — never assume mid fills: `Fill = Mid − k·(Ask−Bid)` when selling, reversed when buying to close, plus commissions and fees.
+- **Daily mark-to-market** — `NAV = cash + shares·price − short_option_liability`. A losing put must show up as a loss while it is open, rather than disappearing from the results until assignment.
+- **Assignment and expiration mechanics** — put ITM at expiry → assign (cash −= strike×100, shares += 100, cost basis = strike − premium received, SHORT_PUT → LONG_STOCK); call ITM → called away (COVERED_CALL → CASH). Expiration-only assignment for the first version; early exercise, ex-dividend effects, and corporate actions come later.
+- **Cash and share accounting**, start to finish.
+
+Testing moves forward chronologically only — walk-forward, never a random split. Every computed quantity (valuation, IV percentile, SMAs, regimes, earnings knowledge) uses only information available at that historical date.
 
 ---
 
 ## 14. Baselines and Evaluation
 
-Baselines built **before** any learning — they are both the yardstick and the reward references:
+The learned strategy must compete against four simpler alternatives:
 
-1. **Fixed Wheel** — 30–45 DTE, 20-delta puts and calls
-2. **Conservative Wheel** — 10–15 delta
-3. **Simple adaptive rules** — Bull+Cheap → 30Δ; Neutral → 20Δ; Bear → 10Δ; Extreme bear → WAIT (also the Q-table prior)
-4. **Buy-and-hold**
+1. A fixed wheel.
+2. A conservative wheel.
+3. A wheel that adjusts risk using simple market rules.
+4. Buy-and-hold.
 
-**If RL cannot reliably beat Baseline 3, the complexity isn't justified.** That is the project's falsifiable claim.
+The key test is: **if learning cannot reliably improve on simple adaptive rules, it is not worth the complexity.**
 
-Metrics beyond win rate: CAGR, volatility, Sharpe, Sortino, max drawdown, CVaR; premium income and yield; assignment and call-away rates; average delta/DTE; capital utilization, time in cash/stock; turnover and costs. **Segment all results by regime** (bull, bear, crash, recovery, sideways, high/low vol) — the regime breakdown matters more than headline CAGR.
+Evaluation includes growth, volatility, drawdowns, severe losses, trading costs, and capital usage — not just win rate. Results are also separated by market conditions so a strong bull-market result cannot hide poor crash performance.
 
 ---
 

@@ -20,10 +20,10 @@ from rlbot.learning.trajectories import validate_record
 from rlbot.options.premium_source import SyntheticBSPremiumSource
 from rlbot.options.selector import SelectorConfig, select_contract
 from rlbot.risk.engine import RiskConfig, validate_open
-from rlbot.risk.mcb_gates import (LOW_YIELD_ROC, mcb_ceiling,
+from rlbot.risk.mcb_gates import (LOW_YIELD_ROC, is_downtrend, mcb_binding,
                                   net_basis_flag, opportunity_scan,
                                   premium_required, reachability_advice,
-                                  required_tier, tradeable)
+                                  tradeable)
 from rlbot.simulator.portfolio import ExecutionConfig
 from rlbot.state.encoder import encode_q_state
 from rlbot.state.enums import CashAction, PositionState, legal_actions
@@ -46,11 +46,13 @@ MODEL_NOTE = ("Quotes marked historical_chain are REAL previous-close chain "
               "way, confirm against your broker's live quote before acting. "
               "Recommendations only - not investment advice.")
 VAL_GATE_NOTE = ("Valuation gates use mcb-wheel's Maximum Comfortable Basis "
-                 "report (replacing the Wheel-FV feed, 2026-08-30): every put "
-                 "must land a net basis (strike - premium) at/below the MCB "
-                 "ceiling of the required tier — the DEEPER of the report's "
-                 "guardrail tier and our market-regime posture. 'Prem req' is "
-                 "the minimum LIVE premium that makes the strike acceptable - "
+                 "report as an aggressiveness pivot, not a uniform rejection "
+                 "boundary (v2, 2026-09-09): the ceiling only blocks a trade "
+                 "when the producer's per-ticker Posture calls for it — "
+                 "CONSERVATIVE never blocks, HIGHER always does, MODERATE "
+                 "depends on which risk tier is being filled — or when this "
+                 "repo's own downtrend override applies. 'Prem req' is the "
+                 "minimum LIVE premium that makes the strike acceptable - "
                  "check it against your broker quote.")
 LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "WAIT in any stress regime). Assignment means 3x market "
@@ -99,7 +101,7 @@ LEGEND = """## Legend
 
 The Δ column is the selected contract's actual delta (≈ assignment probability); DTE targets 25–45 days. Leveraged ETFs (3x) cap at BALANCED and always WAIT in stress.
 
-**MCB gates (mcb-wheel, replaces the Wheel-FV feed).** MCB = the highest net cost basis (strike − premium) still comfortable to own, published per ticker in three descending zones FAIR > ATTRACTIVE > EXCELLENT. The HARD rule: `strike − premium ≤ MCB(required tier)`, where the required tier is the *deeper* of (a) the report's guardrail-resolved `min_eligible_tier` (behavioral guardrail NORMAL→FAIR, CAUTION→ATTRACTIVE, SEVERE→EXCELLENT) and (b) our market-regime posture (BULL_LOW_VOL→FAIR; any other regime→at least ATTRACTIVE). `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability is advisory: `UNREACHABLE` skips the strike scan (the FAIR basis sits below a bear-correction price); `PATIENCE` allows only elevated-IV setups (vol-comp ATTRACTIVE). Open CSPs are flagged when their filled net basis exceeds the ceiling; the call side is governed by your cost basis (calls never sold below basis), since MCB is an acquisition-side construct. A report older than 5 trading sessions is expired and disables all of this (warning shown).
+**MCB gates (mcb-wheel v2, 2026-09-09) — an aggressiveness pivot, not a uniform rejection boundary.** `wheel_entry` is the net cost basis (strike − premium) comfortable to acquire at. The producer publishes a `Posture` per ticker: **CONSERVATIVE** (far above entry, rising/sideways) — the ceiling is advisory only, since a conservative-delta put here is a low-probability income trade, not an acquisition attempt; **HIGHER** (at/near entry) — the ceiling is hard, always, since assignment is welcome and sought; **MODERATE** (entry reachable via a typical correction) — hard only for BALANCED-and-up tiers, advisory for income tiers (WAIT/DEFENSIVE/CONSERVATIVE), the one case the producer leaves to us. `(hard)` next to the posture in the table means the ceiling actually filtered this trade. **A confirmed downtrend overrides all of this to conservative-or-wait** — "don't catch a falling knife" — since the producer computes no trend signal; this repo supplies it. `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability remains a separate, informational signal (`UNREACHABLE`/`PATIENCE`), unrelated to Posture. Open CSPs are flagged only when the ceiling was/would be hard for them; the call side is governed by cost-basis discipline (calls never sold below basis), since MCB is acquisition-side only. A report older than 5 trading sessions is expired and disables all of this (warning shown).
 
 **Position guidance.** HOLD to expiration is the validated default (rolling on margin-of-safety triggers tested 1.2–2.3%/yr worse). Flags are attention signals: `BREACHED` = option in the money; `challenged` = |delta| ≥ 0.40; `expiry week` = ≤ 7 days left. A breached covered call at/above your cost basis is the wheel's intended profit-taking exit, not a failure.
 """
@@ -147,13 +149,15 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
     action = policy.decide(PositionState.CASH, q, row)
     out["policy_action"] = action.name
-    ceiling = None
+    ceiling, hard = None, False
     if mcb is not None:
-        tier = required_tier(mcb, q[0])
-        ceiling = mcb_ceiling(mcb, q[0])
+        downtrend = is_downtrend(row.get("structure"))  # pd.Series.get: None if absent
+        ceiling, hard = mcb_binding(mcb, action, downtrend)
         out["mcb"] = {
-            "tier": tier,
+            "posture": mcb.delta_posture,
             "ceiling": round(ceiling, 2) if ceiling is not None else None,
+            "hard": hard,
+            "downtrend_override": downtrend,
             "guardrail": mcb.guardrail,
             "layer_a": mcb.layer_a,
             "reachability": mcb.reachability,
@@ -164,6 +168,10 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             out["action"] = "WAIT"
             out["reason"] = why
             return out
+    # Only a HARD binding filters candidates (SPEC-011 §2 rule 1, v2): a
+    # CONSERVATIVE-posture ceiling, or a MODERATE-posture ceiling on an
+    # income tier, is advisory and must not touch the selector at all.
+    binding_ceiling = ceiling if hard else None
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
@@ -177,7 +185,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     chain = ps.chain(date, out["spot"], vol, "P")
     quote, n_cands = select_contract(action, chain, out["spot"], vol, q[1],
                                      cfg=SelectorConfig(),
-                                     net_basis_ceiling=ceiling)
+                                     net_basis_ceiling=binding_ceiling)
     # Book-level enforcement (2026-08-30): with a book, the whole
     # position set feeds RISK-4/5/8 and the estimated-earnings blackout.
     if book is not None and quote is not None and rcfg is not None:
@@ -215,23 +223,27 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                              RiskConfig.single_ticker())
     if quote is None:
         out["action"] = "WAIT"
-        # Attribute the empty scan honestly: only blame the MCB ceiling if
-        # dropping it would have produced a contract (else it's chain/liquidity).
-        if ceiling is not None:
+        # Attribute the empty scan honestly: only blame MCB if it was
+        # actually HARD for this action (advisory ceilings never filter, so
+        # they can't have caused an empty scan), and only if dropping it
+        # would have produced a contract (else it's chain/liquidity).
+        if binding_ceiling is not None:
             ungated, _ = select_contract(action, chain, out["spot"], vol, q[1],
                                          cfg=SelectorConfig())
             if ungated is not None:
                 head = (
-                    f"MCB unreachable within normal delta bands: ceiling "
-                    f"{ceiling:.2f} (best band strike {ungated.strike:g} "
-                    f"needs premium >= "
-                    f"{premium_required(ungated.strike, ceiling):.2f}, "
+                    f"MCB unreachable within normal delta bands "
+                    f"(posture {mcb.delta_posture or '?'}"
+                    f"{', downtrend override' if out['mcb']['downtrend_override'] else ''}"
+                    f"): ceiling {binding_ceiling:.2f} (best band strike "
+                    f"{ungated.strike:g} needs premium >= "
+                    f"{premium_required(ungated.strike, binding_ceiling):.2f}, "
                     f"model {ungated.mid:.2f})")
                 # SPEC-011 §6: below-band advisory scan — the economics are
                 # rendered, the judgment is the user's (2026-09-01: the ROC
                 # threshold is a LOW YIELD flag, never a blocker). Never
                 # executable.
-                opp = opportunity_scan(chain, ceiling,
+                opp = opportunity_scan(chain, binding_ceiling,
                                        low_yield_roc=low_yield_roc)
                 if opp is None:
                     out["reason"] = (head + "; no MCB-compliant strike in "
@@ -252,7 +264,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                 return out
         out["reason"] = "tier unimplementable in current chain window"
         return out
-    mcb_viol = net_basis_flag(quote.strike, quote.mid, ceiling)
+    mcb_viol = net_basis_flag(quote.strike, quote.mid, binding_ceiling)
     if mcb_viol is not None:               # belt-and-suspenders: selector
         out["action"] = "WAIT"             # already pre-filtered on this
         out["reason"] = f"MCB gate: {mcb_viol}"
@@ -300,14 +312,22 @@ def guide_position(pos: dict, frame: pd.DataFrame, ps,
     # basis sits above the required-tier ceiling. The call side has no MCB
     # analogue — cost-basis discipline (calls never below basis) governs it.
     if mcb is not None and cp == "P":
+        # v2 (SPEC-011 §2 rule 1): flag only when the ceiling was/would be
+        # HARD for this position — CONSERVATIVE-posture names above their
+        # wheel_entry are a legitimate income position, not a violation.
+        # No recorded entry tier for open positions, so the current model
+        # delta stands in for MODERATE's tier split (same 0.18 boundary).
         prem0 = float(pos.get("premium_fill", 0) or 0)
-        regime = market_regime if market_regime is not None \
-            else int(frame.iloc[-1]["market_regime"])
-        ceil = mcb_ceiling(mcb, regime)
-        if ceil is not None and pos["strike"] - prem0 > ceil + 1e-9:
+        downtrend = is_downtrend(row.get("structure"))
+        posture = mcb.delta_posture
+        hard = bool(downtrend or posture == "HIGHER"
+                    or (posture == "MODERATE" and abs(delta) >= 0.18))
+        ceil = mcb.wheel_entry
+        if ceil is not None and hard and pos["strike"] - prem0 > ceil + 1e-9:
+            tag = " (downtrend override)" if downtrend else f" (posture {posture})"
             flags.append(
                 f"net basis {pos['strike'] - prem0:.2f} above MCB "
-                f"{required_tier(mcb, regime)} ceiling {ceil:.2f}")
+                f"ceiling {ceil:.2f}{tag}")
         if mcb.layer_a in ("MONITOR_ONLY", "HALT"):
             flags.append(f"MCB layer A now {mcb.layer_a} — no new exposure")
     pc = premium_captured(mark, float(pos.get("premium_fill", 0) or 0))
@@ -393,7 +413,7 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
     lines += ["", "## Opening recommendations (cash sleeve)", "",
               f"_{VAL_GATE_NOTE}_", "",
               "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
-              "| MCB tier | Ceiling | Prem req | MCB flags |",
+              "| Posture | Ceiling | Prem req | MCB flags |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
@@ -401,10 +421,13 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
         v = r.get("mcb") or {}
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
         action = r["action"] + (" ⚠ REVIEW" if r.get("review_warnings") else "")
+        posture = v.get("posture", "—")
+        if v.get("hard"):
+            posture += " (hard)"
         lines.append(f"| {name} | {state} | {action} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
                      f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
-                     f"| {v.get('tier', '—')} | {v.get('ceiling', '—')} "
+                     f"| {posture} | {v.get('ceiling', '—')} "
                      f"| {v.get('premium_required', '—')} "
                      f"| {_mcb_flags(v)} |")
     # SPEC-011 §6.4: the scan's outcome must be visible in the brief, with
@@ -433,7 +456,7 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
         lines += ["", "## Candidates (momentum monitor)", "",
                   f"_{CANDIDATE_NOTE}_", "",
                   "| Ticker | Mom pct | 4w chg | State | Action | Strike | DTE "
-                  "| Δ | Model prem | MCB tier | Ceiling | MCB flags |",
+                  "| Δ | Model prem | Posture | Ceiling | MCB flags |",
                   "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in cand_recs:
             state = "/".join(r.get("state_names", ["—"]))
@@ -445,7 +468,8 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
                 f"| {'+' if (chg or 0) > 0 else ''}{chg if chg is not None else '—'} "
                 f"| {state} | {r['action']} | {c.get('strike', '—')} "
                 f"| {c.get('dte', '—')} | {c.get('delta', '—')} "
-                f"| {c.get('model_premium', '—')} | {v.get('tier', '—')} "
+                f"| {c.get('model_premium', '—')} "
+                f"| {v.get('posture', '—')}{' (hard)' if v.get('hard') else ''} "
                 f"| {v.get('ceiling', '—')} | {_mcb_flags(v)} |")
 
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]

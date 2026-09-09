@@ -34,6 +34,8 @@ If the filter leaves zero candidates in-band: widen delta band by ±0.02 once; i
 
 The delta bands are the **executable** boundary and keep the RL actions' frozen semantics (SPEC-001). When the empty scan is caused by the MCB ceiling rather than the chain, the below-band `MCB_OPPORTUNITY_SCAN` (SPEC-011 §6) may additionally surface an advisory-only candidate — outside the RL action space, never executed by the selector.
 
+**MCB net-basis pre-filter (2026-09-09, SPEC-011 §2 rule 1) is no longer unconditionally applied.** Its bindingness now depends on the producer's per-ticker `delta_posture` and, for the MODERATE case, on which tier is being filled — see SPEC-011 §2 for the full table. Practically: the opportunity scan above is now most relevant for HIGHER/MODERATE-posture names still failing a hard ceiling, since CONSERVATIVE-posture names typically clear their in-band scan unblocked and never reach the empty-scan branch at all.
+
 ## 2. Risk engine — RL proposes, risk engine disposes
 
 _(v2 — 2026-08-31: two-tier disposition, potential-exposure RISK-3,
