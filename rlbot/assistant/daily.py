@@ -123,6 +123,69 @@ def _correlated_exposures(ticker, book, closes, spots, nav, rcfg_risk):
     return hits
 
 
+def cumulative_review(recs: list, book, rk, nav: float) -> tuple:
+    """SPEC-004 §2.10 (2026-09-11): the per-trade hard rules validate each
+    recommendation against the EXISTING book, so a brief can propose a set
+    that jointly breaches RISK-5 (week cap) or RISK-8 (stress reserve). This
+    surfaces the joint effect as a human-review warning — never a block —
+    with the room left and one example subset that fits. The user decides.
+
+    Returns (per_ticker_warnings: {ticker: [text]}, summary_lines: [str]).
+    """
+    per, summary = {}, []
+    if book is None or nav <= 0:
+        return per, summary
+    new = [(r["ticker"], r["contract"]["strike"] * 100,
+            pd.Timestamp(r["contract"]["expiration"]))
+           for r in recs if r.get("action") == "SELL_PUT" and r.get("contract")]
+    if not new:
+        return per, summary
+    cap = rk.max_week_assignment_pct * nav
+    by_week = {}
+    for t, esc, exp in new:
+        iso = exp.isocalendar()
+        by_week.setdefault((iso.year, iso.week), []).append((t, esc))
+    for wk, items in sorted(by_week.items()):
+        existing = book.expiry_week_escrow.get(wk, 0.0)
+        added = sum(e for _, e in items)
+        total = existing + added
+        if total <= cap + 1e-9:
+            continue
+        room = max(0.0, cap - existing)
+        fit, used = [], 0.0
+        for t, e in sorted(items, key=lambda x: -x[1]):   # largest-first example
+            if used + e <= room + 1e-9:
+                fit.append(t); used += e
+        names = ", ".join(f"{t} ${e:,.0f}" for t, e in items)
+        text = (f"RISK-5-CUM:week_cap_if_all_executed — ISO week {wk[0]}-W{wk[1]:02d}: "
+                f"existing ${existing:,.0f} + proposed ${added:,.0f} = ${total:,.0f} "
+                f"({total / nav:.1%} of NAV) exceeds the {rk.max_week_assignment_pct:.0%} "
+                f"cap (${cap:,.0f}). Each trade passes alone; together they do not. "
+                f"Room: ${room:,.0f}. Proposed: {names}. One subset that fits: "
+                f"{', '.join(fit) if fit else 'none'} (${used:,.0f}). Human decision.")
+        summary.append(text)
+        for t, _ in items:
+            per.setdefault(t, []).append(text)
+    # RISK-8 joint stress: all proposed puts added to the book at once
+    extra = [{"ticker": t, "strike": esc / 100, "expiration": exp, "escrow": esc}
+             for t, esc, exp in new]
+    puts = list(book.put_positions) + extra
+    tmp = type(book)(n_open_positions=book.n_open_positions, put_escrow=book.put_escrow,
+                     expiry_week_counts=dict(book.expiry_week_counts),
+                     underlyings=set(book.underlyings), put_positions=puts)
+    stress = tmp.stressed_assignment({}, week1_pct=rk.stress_week1_pct,
+                                     week2_pct=rk.stress_week2_pct, itm_pct=rk.stress_itm_pct)
+    if rk.min_stress_reserve_pct > 0 and (nav - stress) / nav < rk.min_stress_reserve_pct:
+        text = (f"RISK-8-CUM:stress_reserve_if_all_executed — with every proposed put "
+                f"added, the assignment stress is ${stress:,.0f}, leaving "
+                f"{(nav - stress) / nav:.1%} of NAV vs the {rk.min_stress_reserve_pct:.0%} "
+                f"reserve. Each trade passes alone. Human decision.")
+        summary.append(text)
+        for t, _, _ in new:
+            per.setdefault(t, []).append(text)
+    return per, summary
+
+
 def _contract_dict(quote, ps, n_cands: int, basis: str | None = None) -> dict:
     """Uniform contract record. `basis` is set only on candidate_contract
     (the contract a WAIT row *would* have traded) so the brief can show
@@ -497,13 +560,18 @@ def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
         for tkr, reason, opp in opps:
             mark = "⚠ " if opp is not None and not opp.get("low_yield") else ""
             lines.append(f"- {mark}**{tkr}**: {reason}")
-    reviews = [(r["ticker"], w) for r in recs
-               for w in r.get("review_warnings", [])]
-    if reviews:
+    # Group identical warning texts (the cumulative RISK-5-CUM/RISK-8-CUM
+    # notices are shared by every affected row) so each renders once, naming
+    # all the tickers it covers; per-ticker warnings (RISK-7/9) stay as-is.
+    grouped: dict = {}
+    for r in recs:
+        for w in r.get("review_warnings", []):
+            grouped.setdefault(w, []).append(r["ticker"])
+    if grouped:
         lines += ["", "### ⚠ Human-review warnings (SPEC-004 §2.8 — "
                       "approve or reject before trading)", ""]
-        for tkr, w in reviews:
-            lines.append(f"> **{tkr}** — {w}")
+        for w, tkrs in grouped.items():
+            lines.append(f"> **{', '.join(tkrs)}** — {w}")
             lines.append(">")
         lines.pop()
     if any(r.get("leveraged") for r in recs):
@@ -746,6 +814,15 @@ def main(argv=None):
                                       risk_cfg=risk_cfg,
                                       book_spots=book_spots, closes=closes,
                                       low_yield_roc=args.low_yield_roc))
+    # SPEC-004 §2.10: joint effect of this run's SELL_PUTs on RISK-5/RISK-8 —
+    # a human-review warning on the affected rows, never a block.
+    cum_per, cum_summary = cumulative_review(recs, book, risk_cfg, args.cash)
+    for r in recs:
+        if r["ticker"] in cum_per:
+            r.setdefault("review_warnings", []).extend(cum_per[r["ticker"]])
+    for line in cum_summary:
+        warnings.append("REVIEW (cumulative): " + line.split(" — ", 1)[1])
+
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4

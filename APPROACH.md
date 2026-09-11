@@ -260,6 +260,7 @@ Per Q-entry bookkeeping: Q value, observation count, average return, return vari
 These are rules the model cannot override: sufficient cash for put assignment, owning shares before selling calls, position limits, acceptable liquidity, and event restrictions.
 
 - **Spread exposure across tickers, strikes, and expiration dates** — no more than **15% of NAV** in potential exposure to a single underlying (shares plus open puts), no more than 12 distinct active names, no more than 15% of NAV in put escrow expiring in any one ISO week.
+- **Joint effect of a whole brief is a warning, not a block:** several recommendations can each pass the week cap or stress reserve alone yet breach it together; the assistant says so, shows the room left and a subset that fits, and leaves the choice to the user.
 - **MCB acquisition ceiling remains hard for acquisition-intent situations** (producer `delta_posture = HIGHER`, or our own BALANCED-and-up tiers within MODERATE) — a non-bypassable limit alongside the exposure caps above. It is deliberately **not** universal; see §7 for the full aggressiveness-pivot split and why a uniform ceiling was wrong.
 
 ```

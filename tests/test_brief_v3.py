@@ -201,3 +201,74 @@ def test_render_brief_signature_has_no_candidates_arg():
     import inspect
     from rlbot.assistant.daily import render_brief
     assert "cand_recs" not in inspect.signature(render_brief).parameters
+
+
+# ------------------------------------------- cumulative within-run review
+
+def _sell(ticker, strike, exp):
+    return {"ticker": ticker, "action": "SELL_PUT",
+            "contract": {"strike": strike, "expiration": exp, "dte": 30,
+                         "delta": -0.15, "model_premium": 2.0}}
+
+
+def test_cumulative_week_cap_is_warning_not_block():
+    from rlbot.assistant.daily import cumulative_review
+    book = BookState(n_open_positions=1, put_escrow=60_500.0, expiry_week_counts={},
+                     underlyings={"Z"},
+                     expiry_week_escrow={(2026, 41): 60_500.0})
+    rk = RiskConfig(min_stress_reserve_pct=0.0)
+    recs = [_sell("AAPL", 300.0, "2026-10-09"), _sell("AMZN", 230.0, "2026-10-09"),
+            _sell("TSM", 385.0, "2026-10-09"), _sell("BRK-B", 485.0, "2026-10-23")]
+    per, summary = cumulative_review(recs, book, rk, 1_000_000.0)
+    # week 41: 60,500 + 91,500 = 152,000 > 150,000 -> warned; week 43 fine
+    assert len(summary) == 1 and "RISK-5-CUM" in summary[0]
+    assert set(per) == {"AAPL", "AMZN", "TSM"} and "BRK-B" not in per
+    assert "Room: $89,500" in summary[0]
+    assert "One subset that fits" in summary[0]
+    # nothing is downgraded — actions untouched
+    assert all(r["action"] == "SELL_PUT" for r in recs)
+
+
+def test_cumulative_under_cap_is_silent():
+    from rlbot.assistant.daily import cumulative_review
+    book = BookState(n_open_positions=0, put_escrow=0.0, expiry_week_counts={},
+                     underlyings=set())
+    rk = RiskConfig(min_stress_reserve_pct=0.0)
+    recs = [_sell("AAPL", 300.0, "2026-10-09"), _sell("AMZN", 230.0, "2026-10-09")]
+    per, summary = cumulative_review(recs, book, rk, 1_000_000.0)
+    assert per == {} and summary == []
+
+
+def test_cumulative_stress_reserve_warning():
+    from rlbot.assistant.daily import cumulative_review
+    book = BookState(n_open_positions=0, put_escrow=0.0, expiry_week_counts={},
+                     underlyings=set())
+    rk = RiskConfig(max_week_assignment_pct=1.0, min_stress_reserve_pct=0.15)
+    # $100K NAV, one $90K put in the nearest week -> stress 90K, 10% left < 15%
+    recs = [_sell("AAPL", 900.0, "2026-10-09")]
+    per, summary = cumulative_review(recs, book, rk, 100_000.0)
+    assert any("RISK-8-CUM" in s for s in summary) and "AAPL" in per
+
+
+def test_cumulative_review_renders_as_review_marker():
+    from rlbot.assistant.daily import render_brief
+    r = _sell("AAPL", 300.0, "2026-10-09")
+    r["state_names"] = ["BULL_LOW_VOL", "FAIR", "POOR"]
+    r["review_warnings"] = ["RISK-5-CUM:week_cap_if_all_executed — ISO week 2026-W41: ..."]
+    text = render_brief("2026-09-10", [r], [], ["REVIEW (cumulative): ISO week 2026-W41: ..."])
+    assert "SELL_PUT ⚠ REVIEW" in text and "RISK-5-CUM" in text
+
+
+def test_shared_review_warning_renders_once_with_all_tickers():
+    from rlbot.assistant.daily import render_brief
+    shared = "RISK-5-CUM:week_cap_if_all_executed — ISO week 2026-W41: shared text"
+    recs = []
+    for t_ in ("AAPL", "AMZN", "TSM"):
+        r = _sell(t_, 300.0, "2026-10-09")
+        r["state_names"] = ["BULL_LOW_VOL", "FAIR", "POOR"]
+        r["review_warnings"] = [shared]
+        recs.append(r)
+    text = render_brief("2026-09-10", recs, [], [])
+    assert text.count("shared text") == 1
+    assert "**AAPL, AMZN, TSM** —" in text
+    assert text.count("SELL_PUT ⚠ REVIEW") == 3        # per-row marker kept

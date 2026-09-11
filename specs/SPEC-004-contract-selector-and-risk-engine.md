@@ -271,6 +271,7 @@ The resulting hierarchy is:
 
 * **RISK-7:** earnings-event exposure.
 * **RISK-9:** correlated/concentrated exposure.
+* **RISK-5-CUM / RISK-8-CUM:** the joint effect of executing every recommendation in one brief (§2.10).
 
 The design principle is:
 
@@ -280,6 +281,20 @@ In the recommendations-only daily assistant, "human approval" is operational
 reality: a hard block renders as WAIT; a warning-carrying recommendation
 renders with a **⚠ REVIEW** marker plus the full warning text, and the human
 executes (or not) at the broker.
+
+### 2.10 Cumulative exposure within one run — warning, not block (2026-09-11)
+
+The hard rules validate each proposed trade against the **existing** book.
+A single brief may therefore propose several puts that each pass alone but
+jointly breach RISK-5 (same ISO expiry week) or RISK-8 (stress reserve).
+Per user decision this is **decision support, never a veto**: after all
+recommendations are formed, the assistant recomputes each affected week
+(existing + all proposed) and the joint stress, and emits
+`RISK-5-CUM:week_cap_if_all_executed` / `RISK-8-CUM:stress_reserve_if_all_executed`
+human-review warnings on every affected row and in the brief header. Each
+warning states existing, proposed, total (% NAV), the cap, the room left,
+the contributing tickers with escrow, and one example subset that fits. No
+recommendation is downgraded. The user chooses which to execute.
 
 ### 2.9 Live overrides
 
