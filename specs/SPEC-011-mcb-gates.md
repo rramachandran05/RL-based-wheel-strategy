@@ -1,11 +1,11 @@
 # SPEC-011 — MCB Gates: Maximum-Comfortable-Basis Feed Replaces Wheel-FV
 
 _Status: v1 implemented 2026-08-31; §6 opportunity scan implemented
-2026-09-01; **v2 aggressiveness-pivot gate (this revision, 2026-09-09) —
-specced here, code follow-up tracked in §8.2, not yet shipped.** §§1–2
-below describe the v2 contract as the target; until §8.2 lands, the code
-still enforces the v1 universal-hard-ceiling behavior, which is strictly
-more conservative (safe, but wrongly WAITs on income-mode names)._
+2026-09-01; **v2 aggressiveness-pivot gate implemented 2026-09-09 (commit
+497c04f: `mcb_binding`, `delta_posture`/`wheel_entry` ingestion, downtrend
+override; verified live on mcb_2026-09-09.csv)**; rule 6 score-side
+valuation implemented 2026-09-09 (commit 8f0dfb5). §§1–3 describe the
+contract as enforced by the code._
 
 ## 0. Motivation
 
@@ -271,8 +271,7 @@ computes no trend signal, so a downtrend override was never part of their
 contract and had to be built here (closes the "falling knife" gap
 identified when this rule was first designed, 2026-09-08).
 
-**Code status:** specced in §§1–2/§3; implementation tracked and, once
-shipped, this line updates to name the commit. Until it lands, the code
-enforces v1's universal-hard ceiling — strictly more conservative than v2
-(safe, but wrongly WAITs on legitimate income-mode trades); the §6
-opportunity scan partially compensates for that gap in the meantime.
+**Code status:** shipped 2026-09-09 in commit 497c04f (gate) and 8f0dfb5
+(rule 6). Live verification the same day: BRK-B and MRVL (CONSERVATIVE
+posture, previously blanket-WAIT) traded above their ceiling; UNH and PANW
+stayed hard via the downtrend override; AAPL no longer blocked by MCB.
