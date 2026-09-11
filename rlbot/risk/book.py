@@ -55,6 +55,14 @@ class BookState:
         iso = pd.Timestamp(expiration).isocalendar()
         return self.expiry_week_escrow.get((iso.year, iso.week), 0.0)
 
+    def expiry_week_headroom(self, cap_pct: float, nav: float) -> dict:
+        """RISK-5 room per ISO week: cap·NAV − escrow already expiring that
+        week (floored at 0). Weeks with no exposure are absent → unlimited.
+        Fed to select_contract(expiry_week_headroom=...) so the selector
+        skips capped weeks instead of picking a contract RISK-5 will reject."""
+        cap = cap_pct * nav
+        return {wk: max(0.0, cap - amt) for wk, amt in self.expiry_week_escrow.items()}
+
     def potential_exposure(self, ticker: str, spot: float | None) -> float:
         """RISK-3 (SPEC-004 §2.2): current share market value (inferred from
         covered calls — the only share signal the positions feed carries) +

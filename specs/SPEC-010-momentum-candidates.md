@@ -1,12 +1,16 @@
 # SPEC-010 — Momentum Candidates Feed + Pipeline Integration
 
-_Status: v1 — 2026-08-27; **appraiser swapped 2026-08-31**: the valuation
-leg is now `../mcb-wheel` (SPEC-011 MCB gates), not `fair-value-discount`.
-Completes the three-codebase integration: `momentum-monitor` (scout) →
-`mcb-wheel` (appraiser) → `wheel-strategy-rlbot` (underwriter + monitor).
-This spec covers the candidate feed (Feed B), the ETF anchor policy, and the
-outstanding experiments. Feed A (valuation) lives in
-`SPEC-011-mcb-gates.md` (formerly SPEC-009)._
+_Status: v1 — 2026-08-27; appraiser swapped to mcb-wheel 2026-08-31;
+**Feed B retired from the daily brief 2026-09-11 (user decision).**
+`rlbot/data/candidates.py` and its tests are retained as a standalone reader
+of the momentum monitor's SQLite store, but the daily assistant no longer
+onboards candidate bars, runs candidate recommendations, or renders a
+Candidates section. The three-codebase constellation is now two live feeds
+into this repo — the FV sheet (universe + positions) and `../mcb-wheel`
+(valuation) — with `momentum-monitor` running standalone on its Saturday
+schedule for the user's own screening. Momentum never reaches put timing or
+the MCB constraint (rule preserved by construction: it is no longer wired in
+at all). §§1–2 below are kept as the record of what was built._
 
 ## 1. Architecture (as built, 2026-08-31)
 

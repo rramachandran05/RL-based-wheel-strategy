@@ -59,13 +59,6 @@ LEVERAGED_NOTE = ("3x rows use the capped leveraged rule table (max BALANCED, "
                   "exposure; model premiums are least reliable on these names "
                   "(vol clustering) — consider reduced contract size.")
 
-CANDIDATE_NOTE = ("Candidates come from the momentum monitor's weekly top "
-                  "decile (pure 120-day momentum, SPEC-010). Capped at "
-                  "CONSERVATIVE, max 2 open positions, MCB gates apply only "
-                  "where the sheet covers the name, "
-                  "and they are NOT part of the gate-validated universe — "
-                  "promote to Core only after your own suitability review.")
-
 LEGEND = """## Legend
 
 **State column** = `market regime / valuation / vol-compensation` — the three inputs the rule policy conditions on.
@@ -130,6 +123,20 @@ def _correlated_exposures(ticker, book, closes, spots, nav, rcfg_risk):
     return hits
 
 
+def _contract_dict(quote, ps, n_cands: int, basis: str | None = None) -> dict:
+    """Uniform contract record. `basis` is set only on candidate_contract
+    (the contract a WAIT row *would* have traded) so the brief can show
+    Strike/DTE/Δ/prem on every row while the decision record stays clean."""
+    d = {"type": "PUT" if quote.cp == "P" else "CALL", "strike": quote.strike,
+         "expiration": str(quote.expiration.date()), "dte": quote.dte,
+         "delta": round(quote.delta, 4), "model_premium": round(quote.mid, 2),
+         "premium_source": getattr(ps, "source_name", "synthetic_bs"),
+         "candidates_considered": n_cands}
+    if basis is not None:
+        d["basis"] = basis
+    return d
+
+
 def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                       policy=None, leveraged: bool = False,
                       mcb=None, book=None, rcfg=None,
@@ -179,25 +186,41 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     if mcb is not None:
         score_val = int(mcb_valuation_state(mcb, q[0]))
         out["mcb"]["score_valuation"] = VAL_NAMES[score_val]
+    rk = risk_cfg or RiskConfig()
+    # Book-aware RISK-5 (SPEC-004 §1.1, 2026-09-11): tell the selector how
+    # much escrow room each ISO expiry week still has so it skips capped weeks
+    # instead of picking a contract the risk engine will certainly reject.
+    headroom = (book.expiry_week_headroom(rk.max_week_assignment_pct, cash)
+                if book is not None else None)
+    vol = float(row["vol_proxy"])
+    chain = ps.chain(date, out["spot"], vol, "P")
     if action == CashAction.WAIT:
         out["action"] = "WAIT"
         out["reason"] = "rule policy: conditions do not pay enough for assignment risk"
+        # Contract columns always populated (SPEC-008 §1.3, 2026-09-11): show
+        # the CONSERVATIVE-tier reference so the reader sees what a put here
+        # would pay today. Information, not a recommendation.
+        ref, n_ref = select_contract(CashAction.PUT_CONSERVATIVE, chain,
+                                     out["spot"], vol, score_val,
+                                     cfg=SelectorConfig(),
+                                     expiry_week_headroom=headroom)
+        if ref is not None:
+            out["candidate_contract"] = _contract_dict(
+                ref, ps, n_ref, basis="reference_conservative_tier")
         return out
     # Reachability is informational (user choice 2026-08-31): the strike scan
     # proceeds and the advisory rides along in the JSON + MCB-flags column.
     advice = reachability_advice(mcb, q[2])
     if advice is not None:
         out["mcb"]["advisory"] = advice
-    vol = float(row["vol_proxy"])
-    chain = ps.chain(date, out["spot"], vol, "P")
     quote, n_cands = select_contract(action, chain, out["spot"], vol, score_val,
                                      cfg=SelectorConfig(),
-                                     net_basis_ceiling=binding_ceiling)
+                                     net_basis_ceiling=binding_ceiling,
+                                     expiry_week_headroom=headroom)
     # Book-level enforcement (2026-08-30): with a book, the whole
     # position set feeds RISK-4/5/8 and the estimated-earnings blackout.
     if book is not None and quote is not None and rcfg is not None:
         from rlbot.risk.book import earnings_in_window, next_earnings_estimate
-        rk = risk_cfg or RiskConfig()
         spots = book_spots or {}
         est = next_earnings_estimate(ticker, rcfg)
         earnings_info = {
@@ -230,14 +253,32 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
                              RiskConfig.single_ticker())
     if quote is None:
         out["action"] = "WAIT"
-        # Attribute the empty scan honestly: only blame MCB if it was
-        # actually HARD for this action (advisory ceilings never filter, so
-        # they can't have caused an empty scan), and only if dropping it
-        # would have produced a contract (else it's chain/liquidity).
+        # Attribute the empty scan honestly, in order: (1) every viable
+        # expiry sits in a week already at the RISK-5 cap; (2) the MCB
+        # ceiling was HARD and binding; (3) chain/liquidity.
+        if headroom is not None:
+            unweeked, n_uw = select_contract(action, chain, out["spot"], vol,
+                                             score_val, cfg=SelectorConfig(),
+                                             net_basis_ceiling=binding_ceiling)
+            if unweeked is not None:
+                iso = unweeked.expiration.isocalendar()
+                capped = sorted(f"{y}-W{w:02d}" for (y, w), room in headroom.items()
+                                if room <= 0)
+                out["candidate_contract"] = _contract_dict(
+                    unweeked, ps, n_uw, basis="blocked_by_risk5_week_cap")
+                out["reason"] = (
+                    "every viable expiry in the 25–45 DTE window falls in an "
+                    "ISO week already at the RISK-5 cap "
+                    f"({', '.join(capped) or 'none listed'}); best contract "
+                    f"absent the cap: {unweeked.strike:g} put "
+                    f"{unweeked.expiration.date()} (week {iso.year}-W{iso.week:02d})")
+                return out
         if binding_ceiling is not None:
             ungated, _ = select_contract(action, chain, out["spot"], vol, score_val,
                                          cfg=SelectorConfig())
             if ungated is not None:
+                out["candidate_contract"] = _contract_dict(
+                    ungated, ps, 0, basis="blocked_by_mcb_ceiling")
                 head = (
                     f"MCB unreachable within normal delta bands "
                     f"(posture {mcb.delta_posture or '?'}"
@@ -275,10 +316,14 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     if mcb_viol is not None:               # belt-and-suspenders: selector
         out["action"] = "WAIT"             # already pre-filtered on this
         out["reason"] = f"MCB gate: {mcb_viol}"
+        out["candidate_contract"] = _contract_dict(quote, ps, n_cands,
+                                                   basis="blocked_by_mcb_ceiling")
         return out
     if not risk.passed:
         out["action"] = "WAIT"
         out["reason"] = f"risk engine: {risk.flags}"
+        out["candidate_contract"] = _contract_dict(quote, ps, n_cands,
+                                                   basis="blocked_by_risk_engine")
         return out
     out["action"] = "SELL_PUT"
     if risk.warnings:      # SPEC-004 §2.8: human-review, never blocking
@@ -286,13 +331,7 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     if ceiling is not None:
         out["mcb"]["premium_required"] = round(
             premium_required(quote.strike, ceiling), 2)
-    out["contract"] = {
-        "type": "PUT", "strike": quote.strike,
-        "expiration": str(quote.expiration.date()), "dte": quote.dte,
-        "delta": round(quote.delta, 4), "model_premium": round(quote.mid, 2),
-        "premium_source": getattr(ps, "source_name", "synthetic_bs"),
-        "candidates_considered": n_cands,
-    }
+    out["contract"] = _contract_dict(quote, ps, n_cands)
     return out
 
 
@@ -411,8 +450,7 @@ def _mcb_flags(v: dict) -> str:
     return ", ".join(bits) if bits else ("—" if not v else "ok")
 
 
-def render_brief(date: str, recs: list, guides: list, warnings: list,
-                 cand_recs: list | None = None) -> str:
+def render_brief(date: str, recs: list, guides: list, warnings: list) -> str:
     lines = [f"# Wheel Daily Brief — {date}", "",
              f"_{MODEL_NOTE}_", ""]
     for w in warnings:
@@ -422,12 +460,17 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
               "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
               "| Posture | Ceiling | Prem req | MCB flags |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
+    any_ref = False
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
-        c = r.get("contract") or {}
+        # Contract columns always populated (2026-09-11): the recommendation
+        # for SELL_PUT rows, the would-be/blocked/reference contract for WAIT.
+        c = r.get("contract") or r.get("candidate_contract") or {}
         v = r.get("mcb") or {}
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
-        action = r["action"] + (" ⚠ REVIEW" if r.get("review_warnings") else "")
+        dagger = "†" if (r["action"] == "WAIT" and r.get("candidate_contract")) else ""
+        any_ref = any_ref or bool(dagger)
+        action = r["action"] + dagger + (" ⚠ REVIEW" if r.get("review_warnings") else "")
         posture = v.get("posture", "—")
         if v.get("hard"):
             posture += " (hard)"
@@ -437,6 +480,12 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
                      f"| {posture} | {v.get('ceiling', '—')} "
                      f"| {v.get('premium_required', '—')} "
                      f"| {_mcb_flags(v)} |")
+    if any_ref:
+        lines += ["", "_† WAIT rows show the contract the selector would have "
+                      "chosen — the risk-engine- or MCB-blocked candidate, or the "
+                      "CONSERVATIVE-tier reference when the policy itself chose "
+                      "WAIT (`candidate_contract` in the JSON). Information, not "
+                      "a recommendation._"]
     # SPEC-011 §6.4: the scan's outcome must be visible in the brief, with
     # 'geometrically unreachable' and 'economically unattractive' distinct.
     opps = [(r["ticker"], r["reason"],
@@ -459,26 +508,6 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
         lines.pop()
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
-    if cand_recs:
-        lines += ["", "## Candidates (momentum monitor)", "",
-                  f"_{CANDIDATE_NOTE}_", "",
-                  "| Ticker | Mom pct | 4w chg | State | Action | Strike | DTE "
-                  "| Δ | Model prem | Posture | Ceiling | MCB flags |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
-        for r in cand_recs:
-            state = "/".join(r.get("state_names", ["—"]))
-            c = r.get("contract") or {}
-            v = r.get("mcb") or {}
-            chg = r.get("rank_change_4w")
-            lines.append(
-                f"| {r['ticker']} | {r.get('momentum_pct', '—')} "
-                f"| {'+' if (chg or 0) > 0 else ''}{chg if chg is not None else '—'} "
-                f"| {state} | {r['action']} | {c.get('strike', '—')} "
-                f"| {c.get('dte', '—')} | {c.get('delta', '—')} "
-                f"| {c.get('model_premium', '—')} "
-                f"| {v.get('posture', '—')}{' (hard)' if v.get('hard') else ''} "
-                f"| {v.get('ceiling', '—')} | {_mcb_flags(v)} |")
-
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
     if guides:
         lines += ["| Ticker | Type | Strike | DTE | Δ now | Prem captured | Guidance | Flags |",
@@ -569,11 +598,6 @@ def main(argv=None):
     skip_core, uni_notes = sync_universe_from_sheet(
         cfg, args.positions or cfg.data.base_path / "positions.csv")
     warnings.extend(uni_notes)
-    from rlbot.data.candidates import latest_candidates
-    candidates, cand_warn = latest_candidates(exclude=set(cfg.assistant_universe))
-    if cand_warn:
-        warnings.append(cand_warn)
-    cand_tickers = [c.ticker for c in candidates]
     if args.download:
         from rlbot.data.build import build_all
         build_all(cfg, download=True)  # cfg carries the sheet-synced universe
@@ -583,8 +607,8 @@ def main(argv=None):
             refresh_valuation(cfg)
         except Exception as e:
             warnings.append(f"FV snapshot skipped: {e}")
-        for ct in cand_tickers + [t for t in cfg.assistant_universe
-                                  if t not in skip_core]:  # onboard new names too
+        for ct in [t for t in cfg.assistant_universe
+                   if t not in skip_core]:                  # onboard new names
             from rlbot.data import sources as _src
             try:
                 _src.load_bars(ct, cfg.data.bars_path)
@@ -593,7 +617,7 @@ def main(argv=None):
                     _src.download_bars([ct], cfg.data.bars_path,
                                        years=cfg.data.ticker_years)
                 except Exception as e:
-                    warnings.append(f"candidate {ct}: bars unavailable ({e})")
+                    warnings.append(f"{ct}: bars unavailable ({e})")
         try:            # refresh the MCB report (sheet-driven universe)
             import subprocess, sys as _sys
             mcb_repo = Path(cfg.data.mcb_dir).parent
@@ -722,41 +746,6 @@ def main(argv=None):
                                       risk_cfg=risk_cfg,
                                       book_spots=book_spots, closes=closes,
                                       low_yield_roc=args.low_yield_roc))
-    cand_recs = []
-    for cand in candidates:
-        try:
-            from rlbot.data import sources as _src
-            from rlbot.data.candidates import cap_candidate_action
-            from rlbot.features.technicals_series import build_feature_frame
-            from rlbot.state.encoder import build_ticker_frame
-            bars = _src.load_bars(cand.ticker, cfg.data.bars_path)
-            mini = build_feature_frame(
-                bars, rv_window=cfg.data.realized_vol_ticker_window)
-            mini.index = mini.index.tz_localize(None) \
-                if mini.index.tz is not None else mini.index
-            mini.insert(0, "ticker", cand.ticker)
-            frame_c = build_ticker_frame(
-                cand.ticker, mini, store.tables["market"],
-                store.tables["valuation"], cfg)
-        except Exception as e:
-            warnings.append(f"candidate {cand.ticker}: skipped ({e})")
-            continue
-
-        class _CappedB3:
-            def decide(self, pos, q, row_):
-                return cap_candidate_action(
-                    AdaptiveRulePolicy().decide(pos, q, row_))
-
-        rec = recommend_opening(cand.ticker, frame_c,
-                                ps_for(cand.ticker, frame_c.index[-1]),
-                                args.cash, policy=_CappedB3(),
-                                mcb=mcb_rows.get(cand.ticker))
-        rec["candidate"] = True
-        rec["momentum_pct"] = round(cand.percentile, 3)
-        rec["rank_change_4w"] = round(cand.rank_change_4w, 3) \
-            if cand.rank_change_4w is not None else None
-        cand_recs.append(rec)
-
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
                         "re-run with --download")             # REQ-8.4
@@ -775,11 +764,11 @@ def main(argv=None):
     live = cfg.data.base_path / "live"
     live.mkdir(parents=True, exist_ok=True)
     payload = {"date": date, "iv_uplift": gate["iv_uplift"],
-               "openings": recs, "candidates": cand_recs,
+               "openings": recs,
                "positions": guides, "warnings": warnings,
                "notes": [MODEL_NOTE, MGMT_NOTE, LEVERAGED_NOTE]}
     (live / f"recommendations_{date}.json").write_text(json.dumps(payload, indent=2))
-    brief = render_brief(date, recs, guides, warnings, cand_recs)
+    brief = render_brief(date, recs, guides, warnings)
     (live / f"brief_{date}.md").write_text(brief)
 
     run_id = f"live-{date}"

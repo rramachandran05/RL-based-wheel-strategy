@@ -168,7 +168,7 @@ Delta ranges are initial engineering parameters, not strategy rules — the poli
 
 ## 7. Deterministic Contract Selector
 
-Once the model chooses a risk category, a conventional algorithm finds the best qualifying option: filter for expiration, delta, liquidity, and trading costs, then score the remaining contracts.
+Once the model chooses a risk category, a conventional algorithm finds the best qualifying option: filter for expiration, delta, liquidity, and trading costs, then score the remaining contracts. In live operation the filter is also **book-aware**: expiries whose ISO week is already at the portfolio's weekly assignment cap are skipped up front (the risk engine would reject them anyway), so a capped week never hides a viable sibling expiry.
 
 ```
 Score = w1·PremiumYield + w2·VolatilityPremium

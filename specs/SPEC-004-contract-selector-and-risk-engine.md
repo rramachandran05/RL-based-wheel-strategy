@@ -10,6 +10,7 @@ Input: an opening action (risk tier → delta band + DTE window per SPEC-001 §2
 - Right type (put/call); |delta| within the tier band; DTE within [25, 45].
 - Real chains only: `volume ≥ min_volume (10)`, `oi ≥ min_oi (100)`, `spread_pct = (ask−bid)/mid ≤ max_spread_pct (0.10)`. Synthetic chains skip liquidity filters (no meaning) — the live assistant on real quotes must not.
 - Covered calls: strike ≥ cost basis (never write below basis — adopted from sibling).
+- **Expiry-week headroom (live, 2026-09-11):** when a book is present, puts whose escrow (`strike × 100 × contracts`) exceeds the remaining RISK-5 room for their ISO expiry week (`cap · NAV − escrow already expiring that week`) are dropped before scoring. Rationale: the DTE-nearest-30 tiebreak was steering trades into already-capped weeks and RISK-5 then rejected them while a sibling expiry in the window would have passed. Pre-filter only — RISK-5 (§2.1) is unchanged as the hard check. Simulator/backtests pass no headroom and are unaffected.
 
 ### 1.2 Score
 

@@ -111,6 +111,10 @@ def select_contract(
     valuation=None,             # WheelValuation or None (SPEC-009 VREQ-5)
     val_cfg=None,
     net_basis_ceiling: float | None = None,   # MCB hard bound (2026-08-30)
+    expiry_week_headroom: dict | None = None,  # {(iso_year, iso_week): $ left
+                                               #  under the RISK-5 cap}; puts
+                                               #  whose escrow exceeds it are
+                                               #  dropped (2026-09-11)
 ):
     """Returns (best_quote_or_None, n_candidates). None => tier unimplementable → WAIT."""
     if isinstance(action, CashAction) and action == CashAction.WAIT:
@@ -139,6 +143,17 @@ def select_contract(
     if net_basis_ceiling is not None:      # MCB contract rule 1 (puts)
         candidates = [q for q in candidates
                       if q.cp != "P" or q.strike - q.mid <= net_basis_ceiling + 1e-9]
+    if expiry_week_headroom is not None:   # book-aware RISK-5 (SPEC-004 §1.1)
+        # Don't walk into an expiry week the risk engine will certainly
+        # reject when a sibling expiry in the DTE window would pass. The
+        # engine's RISK-5 check stays as the hard backstop.
+        def _fits(q):
+            if q.cp != "P":
+                return True
+            iso = q.expiration.isocalendar()
+            room = expiry_week_headroom.get((iso.year, iso.week))
+            return room is None or q.strike * 100 <= room + 1e-9
+        candidates = [q for q in candidates if _fits(q)]
     if not candidates:
         return None, 0
 

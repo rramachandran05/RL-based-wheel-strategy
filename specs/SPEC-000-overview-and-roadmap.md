@@ -21,10 +21,12 @@ in production.
 
 ## 2. Relationship to the sibling projects
 
-**As of 2026-08-31 the live constellation is three repos + one sheet:**
-`momentum-monitor` (in `../vmi-stock-search`, Sat 07:00 — candidate names
-only, SPEC-010) → `../mcb-wheel` (Maximum-Comfortable-Basis report — the
-valuation constraint, SPEC-011) → this repo (underwriter + monitor). The
+**As of 2026-09-11 the live constellation is two feeds + one sheet:**
+`../mcb-wheel` (Maximum-Comfortable-Basis report — the valuation constraint,
+SPEC-011) → this repo (underwriter + monitor), with the Google Sheet
+supplying universe and positions. `momentum-monitor` (`../vmi-stock-search`,
+Sat 07:00) still runs for the user's own screening but **no longer feeds the
+daily brief** (SPEC-010 Feed B retired 2026-09-11; reader module retained). The
 Google Sheet (FV tab + monitor tab) is the system of record for the universe
 and open positions. `../wheel-strategy` is **archive/provenance only**
 (SPEC-008 §1c); `../fair-value-discount` still runs standalone but no longer
@@ -117,6 +119,7 @@ SPEC-001 is the immutable interface (frozen-manifest pattern): simulator, policy
 >
 > Drawdown *improved* in every window for both B3 and B1 under the corrected formula (the spread-cost penalty now avoids illiquid wide-spread contracts; the vol-premium reward now favors genuinely elevated IV instead of chasing raw yield) at the cost of CAGR — a real, economically coherent risk/return shift, not breakage. One qualitative change: in the Full window B3's drawdown (−26.5%) is now marginally worse than B1's (−24.6%), flipping the prior ordering; B3 still holds the better drawdown in both shorter test windows, and still delivers roughly half of buy-and-hold's drawdown at proportionally lower CAGR — the same qualitative trade-off as before, just at corrected magnitude. None of this session's MCB v2 or risk-engine v2 work caused it or is implicated by it (verified: neither reaches a single-ticker backtest — `RiskConfig.single_ticker()` neutralizes every book-level rule; MCB has no historical data path).
 >
+> **Brief changes 2026-09-11 (user decisions):** Candidates/momentum section removed from the daily brief (SPEC-010 Feed B retired; `momentum-monitor` runs standalone). Opening rows now always show `Strike | DTE | Δ | Model prem` — for WAIT rows the blocked or reference contract, marked `WAIT†`, carried as `candidate_contract` so the decision record is unchanged. Selector made book-aware for RISK-5: it skips expiry weeks already at the 15% cap instead of picking a contract the engine will reject (SPEC-004 §1.1). Also: a manual run without `--cash` had floored NAV at book escrow and over-blocked the 09-10 brief — the repo runner now carries `--cash 1000000` like the installed one.
 > **Decomposition (2026-09-10, `b3_decompose.py`, reconciles to the figures above within 0.1%):** the return is total return — premiums *plus* the stock leg. Full 2013–2026, per $1M across the 10 sleeves: net premium **+$2.14M (74% of ΔNAV)**, realized stock P&L at call-away vs put strike **+$0.82M (28%)**, unrealized on still-held shares −$62K (−2%), open-liability residual −$12K. 1,037 puts sold → 86 assigned (8.3%) → 78 called away (91% of assignments); 8/10 sleeves end the window long stock. Recent windows lean harder on premium: Test-1 97% / Test-2 88% of ΔNAV. The stock leg is *net positive* over the full window — forced buys in a survivor mega-cap bull market were exited higher — which is a property of this universe (DATA-GAP-5), not a guarantee. The −26.5% max drawdown is the stock leg: premium alone cannot produce it.
 > **Process lesson, now a standing rule: rerun `python -m rlbot.evaluation.b3_performance --historical` after any change to real-quote scoring, selection, or execution logic — not only after risk-engine, gate, or state-axis changes.** A fix can be correct and silently invalidate the last backtest until someone happens to ask.
 
