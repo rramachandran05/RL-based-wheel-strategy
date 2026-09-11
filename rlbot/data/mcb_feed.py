@@ -49,6 +49,18 @@ class McbRow:
     dd50: float | None = None
     dd75: float | None = None
     dd90: float | None = None
+    # CCA — Covered-Call Assignment levels (mcb-cca-spec.md; call side)
+    cc_posture: str | None = None          # HIGHER / STANDARD / CONSERVATIVE
+    call_exit: float | None = None         # C-levels: EXIT <= TRIM <= PROTECT
+    call_trim: float | None = None
+    call_protect: float | None = None
+    cca: float | None = None               # selected_call_away_level (the floor)
+    cca_mode: str | None = None            # selected_call_mode (EXIT/TRIM/PROTECT)
+    rise_needed: float | None = None       # selected_level / spot - 1
+    up50: float | None = None              # typical 45d upside percentile
+    up75: float | None = None
+    position_shares: float | None = None   # from the positions tab (may be 0/None)
+    position_basis: float | None = None
 
     def ceiling(self, tier: str) -> float | None:
         return self.mcb.get(tier)
@@ -63,6 +75,11 @@ def mcb_dir(cfg: RlbotConfig | None = None) -> Path:
 def _f(v) -> float | None:
     """Nullable float from a CSV cell (NaN/None -> None)."""
     return float(v) if v is not None and pd.notna(v) else None
+
+
+def _s(v) -> str | None:
+    """Nullable string from a CSV cell (NaN/None/empty -> None)."""
+    return str(v) if v is not None and pd.notna(v) and str(v) != "" else None
 
 
 def load_mcb(cfg: RlbotConfig | None = None, as_of=None) -> tuple:
@@ -121,6 +138,17 @@ def load_mcb(cfg: RlbotConfig | None = None, as_of=None) -> tuple:
             dd50=_f(getattr(r, "dd50", None)),
             dd75=_f(getattr(r, "dd75", None)),
             dd90=_f(getattr(r, "dd90", None)),
+            cc_posture=_s(getattr(r, "cc_posture", None)),
+            call_exit=_f(getattr(r, "call_exit", None)),
+            call_trim=_f(getattr(r, "call_trim", None)),
+            call_protect=_f(getattr(r, "call_protect", None)),
+            cca=_f(getattr(r, "selected_call_away_level", None)),
+            cca_mode=_s(getattr(r, "selected_call_mode", None)),
+            rise_needed=_f(getattr(r, "rise_needed_pct", None)),
+            up50=_f(getattr(r, "up50", None)),
+            up75=_f(getattr(r, "up75", None)),
+            position_shares=_f(getattr(r, "position_shares", None)),
+            position_basis=_f(getattr(r, "position_basis", None)),
         )
         if wheel_entry is None or pd.isna(wheel_entry):
             warnings.append(f"{ticker}: no wheel_entry (v2 schema) — "

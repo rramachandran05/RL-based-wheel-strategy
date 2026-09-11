@@ -42,6 +42,8 @@ consumed columns per ticker:
 | `layer_a` | OWN / MONITOR_ONLY / HALT — ownership eligibility |
 | `reachability` | NORMAL / PATIENCE / UNREACHABLE (advisory, distinct from and unchanged by `delta_posture`) |
 | `conf` | Producer confidence; all-NaN zones ⇒ constraint absent |
+| `dd50 / dd75 / dd90` | The ticker's median / 75th / 90th-percentile historical correction from a trailing high — the context `drop_needed` is judged against (rule 6); DD50/DD75 are rendered in the brief as reference |
+| **CCA columns** (`mcb-cca-spec.md` §8, 2026-09-08) | `call_exit ≤ call_trim ≤ call_protect` (call-away levels: upper-percentile valuation multiples + forward fundamental value + FMP median target, floored at basis × (1 + min return)); `selected_call_away_level` **= CCA**, the level for the ticker's `assignment_preference`; `selected_call_mode`; `cc_posture` (HIGHER / STANDARD / CONSERVATIVE); `rise_needed_pct`; `up50/up75/up90` 45-day upside percentiles; `position_shares` / `position_basis` from the positions tab |
 
 Producer cadence is now **daily** (was weekly-ish); the 5-trading-session
 staleness rule (§2 rule 5) is unchanged. The producer's universe is driven
@@ -93,6 +95,20 @@ absent" default (G6 remains open for technical anchors on top).
    not-validated note.
 5. **Staleness** — a report older than 5 trading sessions is expired: gates
    no-op entirely with a warning (constraint absent, never a stale ceiling).
+7. **Covered calls — CCA is a classification, never a rejection (2026-09-11,
+   producer `mcb-cca-spec.md` §6–§7).** The brief carries a covered-call
+   table for every universe name (SPEC-008 §1 step 3b). The stock-side
+   policy tier is **capped by `cc_posture`** (CONSERVATIVE → CALL_CONSERVATIVE
+   at most; STANDARD → CALL_BALANCED; HIGHER → uncapped) and, as the
+   consumer-side trend override the producer leaves to us, a **Bull Trend
+   while CONSERVATIVE protects upside: DEFENSIVE at most**. The selected
+   contract is then classified against **CCA** (`selected_call_away_level`):
+   `strike + premium ≥ CCA` → ASSIGNMENT_ACCEPTABLE; below → INCOME_WAIT
+   with the shortfall, rendered `⚠ REVIEW` — assignment is not desired at
+   that price, permit only with conservative delta and explicit intent. The
+   standing cost-basis rule (calls never below basis) remains hard where a
+   basis exists. Rows without ≥100 shares are reference-only and skip the
+   risk engine; covered-call rows are not written to the trajectory log.
 6. **Scoring input (2026-09-09)** — the selector's assignment-penalty
    multiplier (SPEC-004 §1.2) is fed by `mcb_valuation_state(row,
    market_regime)`: ATTRACTIVE when `drop_needed ≤ dd50`, EXPENSIVE when
@@ -106,6 +122,7 @@ absent" default (G6 remains open for technical anchors on top).
 | Piece | Module | Notes |
 |---|---|---|
 | Loader | `rlbot/data/mcb_feed.py` | PIT-safe (files ≤ as_of only); NaN rows → absent + warning; `DataConfig.mcb_dir`; **v2**: parses `wheel_entry`, `delta_posture`, `dd_now`, `drop_needed`, `action`, `shadow_min_tier` |
+| Covered calls (rule 7) | `rlbot/risk/mcb_gates.py::cca_call_cap`, `classify_covered_call`; `rlbot/assistant/daily.py::recommend_call` | posture tier cap + uptrend override; CCA classification (ASSIGNMENT_ACCEPTABLE / INCOME_WAIT + shortfall); brief section + legend; `covered_calls` in the JSON payload |
 | Scoring input | `rlbot/risk/mcb_gates.py::mcb_valuation_state` | rule 6: MCB position + drawdown severity → ValuationState for the selector's assignment penalty (live only; `dd50/75/90`, `dd_now`, `drop_needed` parsed by the loader) |
 | Posture/ceiling/masks | `rlbot/risk/mcb_gates.py` | **v2**: `mcb_binding(row, action, trend_structure)` → (`ceiling`, `hard: bool`) replaces the old unconditional `required_tier`/`mcb_ceiling`; `tradeable`, `reachability_advice`, `net_basis_flag` (MCB-1), `premium_required` unchanged |
 | Trend overlay | `rlbot/assistant/daily.py` (reads `underlying.structure`, already computed) | Pullback-in-Uptrend / Breakdown forces conservative-or-wait regardless of `delta_posture` |

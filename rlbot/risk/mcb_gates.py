@@ -17,7 +17,7 @@ are unchanged from v1.
 from __future__ import annotations
 
 from rlbot.data.mcb_feed import TIERS, McbRow
-from rlbot.state.enums import CashAction, MarketRegime, VolCompensation
+from rlbot.state.enums import CashAction, MarketRegime, StockAction, VolCompensation
 
 # SPEC-011 §2 rule 1: downtrend structures that override delta_posture to
 # conservative-or-wait ("don't catch a falling knife"). Matches the vendored
@@ -235,3 +235,49 @@ def opportunity_scan(chain: list, ceiling: float,
             flags.append("liquidity poor")
         best["flags"] = flags
     return best
+
+
+# ---------------------------------------------------------------- CCA (calls)
+# mcb-cca-spec.md §6/§7 (producer) + SPEC-011 §2 rule 7 (consumer). The
+# selected call-away level is a CLASSIFICATION, never an auto-reject; the
+# posture caps how aggressive a call tier may be; the uptrend override is ours.
+
+CC_TIER_CAP = {                      # cc_posture -> most aggressive call tier
+    "CONSERVATIVE": StockAction.CALL_CONSERVATIVE,   # assignment undesirable here
+    "STANDARD": StockAction.CALL_BALANCED,           # reachable within typical upside
+    "HIGHER": StockAction.CALL_AGGRESSIVE,           # at/above the level: welcome
+}
+UPTREND_STRUCTURES = {"Bull Trend"}
+
+
+def cca_call_cap(action, cc_posture: str | None, structure: str | None) -> tuple:
+    """(capped_action, reason|None). Caps the policy's call tier by the
+    producer's cc_posture; a strong uptrend while assignment is undesirable
+    (CONSERVATIVE) protects upside: DEFENSIVE at most (consumer-side trend
+    override, the call-side twin of the CSP downtrend rule)."""
+    if action == StockAction.WAIT:
+        return action, None
+    capped, why = action, None
+    if cc_posture == "CONSERVATIVE" and structure in UPTREND_STRUCTURES:
+        if int(action) > int(StockAction.CALL_DEFENSIVE):
+            capped, why = StockAction.CALL_DEFENSIVE, (
+                "cc_posture CONSERVATIVE in a Bull Trend: protect upside — "
+                "DEFENSIVE at most (uptrend override)")
+        return capped, why
+    cap = CC_TIER_CAP.get(cc_posture)
+    if cap is not None and int(action) > int(cap):
+        capped, why = cap, f"cc_posture {cc_posture}: tier capped at {cap.name}"
+    return capped, why
+
+
+def classify_covered_call(strike: float, premium: float, level: float | None) -> tuple:
+    """mcb-cca-spec §7 pure helper: (classification, shortfall).
+    strike + premium >= level -> ASSIGNMENT_ACCEPTABLE (shortfall 0);
+    below -> INCOME_WAIT with shortfall = level - (strike + premium);
+    no level -> (None, None) — constraint absent."""
+    if level is None:
+        return None, None
+    exit_value = strike + premium
+    if exit_value >= level - 1e-9:
+        return "ASSIGNMENT_ACCEPTABLE", 0.0
+    return "INCOME_WAIT", round(level - exit_value, 2)

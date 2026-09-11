@@ -187,6 +187,8 @@ The scoring weights are design choices that still need to be specified and teste
 | MODERATE | Entry reachable through a typical correction | Hard for our BALANCED-and-up tiers (assignment-seeking); advisory for WAIT/DEFENSIVE/CONSERVATIVE tiers (income-only) — the one case the producer leaves to us to resolve. |
 | HIGHER | At/near entry, or at its typical correction level, stable or rising | Hard, always — assignment is welcome and actively sought here. |
 
+**Covered calls have the mirror-image construct — CCA, the Covered-Call Assignment level** (mcb-wheel): the price at which being called away is acceptable (EXIT ≤ TRIM ≤ PROTECT per your preference, floored at basis × (1 + minimum return)). It **classifies rather than rejects**: `strike + premium ≥ CCA` is acceptable assignment; below it is INCOME_WAIT, surfaced for review. The producer's `cc_posture` caps how aggressive the call tier may be, and a Bull Trend while assignment is undesirable protects upside (DEFENSIVE at most — our override, the call-side twin of the downtrend rule).
+
 **One override belongs to us, not the producer: a strong downtrend forces conservative-or-wait regardless of posture** ("don't catch a falling knife"). The producer computes no trend signal; this repo overlays its own (`classify_structure` — Bull Trend / Recovery / Base / Pullback / Breakdown, already computed and logged per §5, previously unused for this purpose).
 
 ---
