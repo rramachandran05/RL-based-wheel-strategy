@@ -293,7 +293,11 @@ recommendations are formed, the assistant recomputes each affected week
 `RISK-5-CUM:week_cap_if_all_executed` / `RISK-8-CUM:stress_reserve_if_all_executed`
 human-review warnings on every affected row and in the brief header. Each
 warning states existing, proposed, total (% NAV), the cap, the room left,
-the contributing tickers with escrow, and one example subset that fits. No
+the contributing tickers with escrow, and one example subset that fits —
+labelled a **capacity example, not a ranking** (fitting the limit does not
+make it the best combination). Weeks are named by **calendar dates**
+("Expiration week of October 5–9, 2026"), never by ISO week number, in the
+warning text and in the brief's Capital-and-limits table (SPEC-008 §1). No
 recommendation is downgraded. The user chooses which to execute.
 
 ### 2.9 Live overrides

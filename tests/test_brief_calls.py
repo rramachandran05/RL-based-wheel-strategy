@@ -125,22 +125,164 @@ def test_brief_renders_cc_section_dd_columns_and_legend():
                                                                      mcb={"FAIR": 60.0}))
     call = recommend_call("PP", _frame(), PS, 100_000.0, mcb=_mcb(cca=140.0))
     text = render_brief("2026-08-27", [put], [], [], [call])
-    # DD columns present and populated on the put row
-    assert "| DD50 | DD75 |" in text
+    # pullback columns: dollar move + resulting price, % secondary; no
+    # ref_high in the fixture -> applied to spot and labelled illustrative
+    assert "| Typical historical pullback | Larger historical pullback |" in text
     row = [ln for ln in text.splitlines() if ln.startswith("| PP |")][0]
-    assert "10.0%" in row and "16.0%" in row
-    # CC section, CCA column with mode, INCOME_WAIT check, reference marker
+    assert "90.00 (−10.00, 10.0%) ~illustrative from today's price" in row
+    assert "84.00 (−16.00, 16.0%) ~illustrative" in row
+    assert "| 100.00 |" in row                                   # Price column
+    # CC section: no shares -> hypothetical watchlist, not the holdings table
     assert "## Covered-call recommendations (stock sleeve)" in text
-    assert "| CC posture | CCA | Exit check | Shares |" in text
-    assert "140.00 (TRIM)" in text and "INCOME_WAIT (−" in text and "none (ref)" in text
-    assert "Covered-call review (CCA INCOME_WAIT" in text
+    assert "### Hypothetical watchlist — no shares held" in text
+    assert "_No holdings with ≥100 shares on the positions tab._" in text
+    assert "140.00 (TRIM)" in text and "INCOME_WAIT (−" in text
+    assert "**Reference only** | no shares held — hypothetical" in text
     # legend defines Ceiling as the MCB value and CCA
     assert "**Ceiling** | **The MCB value**" in text
     assert "**CCA** | **Covered-Call Assignment level**" in text
-    assert "DD50 / DD75" in text
+    assert "Typical / Larger historical pullback" in text
 
 
 def test_render_brief_without_calls_unchanged():
     from rlbot.assistant.daily import render_brief
     text = render_brief("2026-08-27", [], [], [])
     assert "Covered-call recommendations" not in text
+
+
+# ------------------------------------------------- 2026-09-11 report changes
+
+def test_pullback_scenarios_from_reference_high_and_illustrative():
+    from rlbot.assistant.daily import pullback_scenarios
+    p = pullback_scenarios(200.0, 150.0, 0.18, 0.25)
+    assert p["basis"] == "ref_high"
+    assert p["typical"] == {"pct": 0.18, "drop": 36.0, "price": 164.0}
+    assert p["larger"]["price"] == 150.0
+    q = pullback_scenarios(None, 150.0, 0.18, None)
+    assert q["basis"] == "spot" and q["typical"]["price"] == 123.0 and q["larger"] is None
+    assert pullback_scenarios(None, None, 0.1, 0.2) is None
+
+
+def test_high_date_found_in_close_series():
+    from rlbot.assistant.daily import high_date
+    idx = pd.bdate_range("2026-01-05", periods=5)
+    f = pd.DataFrame({"close": [100, 120, 110, 119.9, 105]}, index=idx)
+    assert high_date(f, 120.0) == "2026-01-06"
+    assert high_date(f, 200.0) is None            # not in the series -> no guess
+    assert high_date(f, None) is None
+
+
+def test_week_label_calendar_dates():
+    from rlbot.assistant.daily import week_label
+    assert week_label(2026, 41) == "October 5–9, 2026"
+    assert week_label(2026, 40) == "September 28–October 2, 2026"
+
+
+def test_decision_status_put_rows():
+    from rlbot.assistant.daily import decision_status
+    assert decision_status({"action": "SELL_PUT"})["status"] == "Candidate"
+    d = decision_status({"action": "SELL_PUT", "review_warnings": [
+        "RISK-5-CUM:week_cap_if_all_executed — ...", "RISK-7:earnings_review — ..."]})
+    assert d["status"] == "Candidate — review required"
+    assert "week escrow cap" in d["reason"] and "earnings" in d["reason"]
+    d = decision_status({"ticker": "MSFT", "action": "WAIT",
+                         "reason": "risk engine: ['RISK-3:concentration']",
+                         "risk_detail": {"flags": ["RISK-3:concentration"],
+                                         "exposure_pct": 0.244, "exposure_cap_pct": 0.15}})
+    assert d["status"] == "Blocked — position limit"
+    assert "concentration limit" in d["reason"] and "24.4%" in d["reason"] and "15%" in d["reason"]
+    assert decision_status({"action": "WAIT", "reason": "rule policy: ..."})["status"] == "Reference only"
+    d = decision_status({"action": "WAIT", "reason": "MCB unreachable within normal delta bands ...",
+                         "mcb": {"ceiling": 50.05, "posture": "CONSERVATIVE", "downtrend_override": True}})
+    assert d["status"] == "Blocked — MCB ceiling" and "downtrend override" in d["reason"]
+    assert decision_status({"action": "WAIT", "reason": "every viable expiry ..."})["status"] == "Blocked — position limit"
+
+
+def test_call_decision_status_and_coverage_counts():
+    from rlbot.assistant.daily import call_decision_status, recommend_call
+    from rlbot.risk.book import BookState
+    # 400 shares, 4 open CC contracts -> nothing left to cover
+    book = BookState(cc_shares={"T": 400})
+    rec = recommend_call("T", _frame(), PS, 100_000.0, book=book,
+                         mcb=_mcb(position_shares=400, position_basis=90.0,
+                                  cc_posture="HIGHER", cca=95.0))
+    assert rec["cca"]["shares"] == 400 and rec["cca"]["committed_shares"] == 400
+    assert rec["cca"]["available_contracts"] == 0
+    d = call_decision_status(rec)
+    assert d["status"] == "Blocked — no uncovered shares" and "400 already committed" in d["reason"]
+    # 950 shares, no open calls -> 9 contracts coverable
+    rec2 = recommend_call("T", _frame(), PS, 100_000.0, book=BookState(),
+                          mcb=_mcb(position_shares=950, position_basis=90.0,
+                                   cc_posture="HIGHER", cca=95.0))
+    assert rec2["cca"]["available_contracts"] == 9
+    if rec2["action"] == "SELL_CALL":
+        assert call_decision_status(rec2)["status"].startswith("Candidate")
+    # open CCs but no MCB share count -> shares inferred = committed, none free
+    rec3 = recommend_call("T", _frame(), PS, 100_000.0, book=BookState(cc_shares={"T": 200}))
+    assert rec3["cca"]["shares"] == 200 and rec3["cca"]["available_contracts"] == 0
+
+
+def test_capital_summary_and_rendering():
+    from rlbot.assistant.daily import capital_summary, render_brief
+    from rlbot.risk.book import BookState
+    from rlbot.risk.engine import RiskConfig
+    book = BookState(put_escrow=60_500.0, expiry_week_escrow={(2026, 41): 60_500.0},
+                     put_positions=[{"ticker": "Z", "strike": 605.0, "expiration": "2026-10-09",
+                                     "escrow": 60_500.0}])
+    recs = [{"ticker": "AAPL", "action": "SELL_PUT",
+             "contract": {"strike": 300.0, "expiration": "2026-10-09"}},
+            {"ticker": "AMD", "action": "SELL_PUT",
+             "contract": {"strike": 465.0, "expiration": "2026-10-09"}},
+            {"ticker": "BRK-B", "action": "SELL_PUT",
+             "contract": {"strike": 485.0, "expiration": "2026-10-23"}}]
+    stock = {"MSFT": {"shares": 400, "spot": 492.44, "value": 196_976.0}}
+    cap = capital_summary(book, 1_000_000.0, recs, stock, RiskConfig())
+    assert cap["available_verified"] is False
+    assert cap["available_cash"] == 1_000_000.0 - 60_500.0 - 196_976.0
+    assert cap["proposed_escrow"] == 125_000.0 and cap["n_proposed"] == 3
+    w41 = [w for w in cap["weeks"] if w["iso"] == "2026-W41"][0]
+    assert w41["label"] == "October 5–9, 2026"
+    assert w41["existing"] == 60_500.0 and w41["remaining"] == 89_500.0
+    assert w41["proposed"] == 76_500.0 and w41["over_by"] == 0.0
+    w43 = [w for w in cap["weeks"] if w["iso"] == "2026-W43"][0]
+    assert w43["existing"] == 0.0 and w43["proposed"] == 48_500.0
+    # verified figure supplied -> labelled verified, used as-is
+    capv = capital_summary(book, 1_000_000.0, recs, stock, RiskConfig(), available_cash=500_000.0)
+    assert capv["available_verified"] and capv["available_cash"] == 500_000.0
+    text = render_brief("2026-09-10", [], [], [], None, cap)
+    assert "## Capital and limits" in text
+    assert "| Total account value (NAV) | $1,000,000 |" in text
+    assert "| Cash reserved for open puts (escrow) | $60,500 |" in text
+    assert "| Stock sleeve (shares × last close) | $196,976 | MSFT 400 × 492.44 |" in text
+    assert "| Estimated cash available for new trades | $742,524 |" in text
+    assert "### Expiration-week capacity (cap 15% of NAV = $150,000 per expiration week)" in text
+    assert "| October 5–9, 2026 | $60,500 | $89,500 | $76,500 (AAPL, AMD) | $137,000 (13.7%) | within cap |" in text
+    assert "capacity example, not a ranking" in text
+    textv = render_brief("2026-09-10", [], [], [], None, capv)
+    assert "| Verified cash available for new trades | $500,000 |" in textv
+
+
+def test_capital_summary_flags_negative_estimate():
+    from rlbot.assistant.daily import capital_summary, render_brief
+    from rlbot.risk.book import BookState
+    from rlbot.risk.engine import RiskConfig
+    book = BookState(put_escrow=630_500.0)
+    stock = {"NOW": {"shares": 1500, "spot": 131.17, "value": 196_755.0}}
+    cap = capital_summary(book, 800_000.0, [], stock, RiskConfig())
+    assert cap["inconsistent"] is True and cap["available_cash"] < 0
+    text = render_brief("2026-09-10", [], [], [], None, cap)
+    assert "| ⚠ Inconsistent inputs |" in text and "not fully cash-secured" in text
+    capv = capital_summary(book, 800_000.0, [], stock, RiskConfig(), available_cash=50_000.0)
+    assert capv["inconsistent"] is False
+
+
+def test_call_status_thin_chain_above_basis_is_not_cost_basis_block():
+    from rlbot.assistant.daily import call_decision_status
+    rec = {"action": "WAIT", "spot": 53.18,
+           "reason": "tier unimplementable in current chain window (no call strike at/above cost basis)",
+           "cca": {"shares": 950, "committed_shares": 0, "available_contracts": 9, "basis": 52.45}}
+    d = call_decision_status(rec)
+    assert d["status"] == "No contract" and "thin chain" in d["reason"]
+    rec["spot"] = 40.0
+    d = call_decision_status(rec)
+    assert d["status"] == "Blocked — cost basis" and "40.00 below basis 52.45" in d["reason"]

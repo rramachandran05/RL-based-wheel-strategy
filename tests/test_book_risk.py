@@ -160,6 +160,6 @@ def test_brief_renders_review_warnings():
                         "model_premium": 5.0},
            "review_warnings": ["RISK-7:earnings_review — EARNINGS RISK: ..."]}
     text = render_brief("2026-08-28", [rec], [], [])
-    assert "SELL_PUT ⚠ REVIEW" in text
-    assert "Human-review warnings" in text
+    assert "**Candidate — review required**" in text
+    assert "Review items for candidates" in text
     assert "RISK-7:earnings_review" in text

@@ -187,12 +187,13 @@ def test_brief_shows_contract_columns_on_wait_rows_and_no_candidates_section():
     w = recommend_opening("WW", _frame(), PS, 100_000.0, policy=_AlwaysWait())
     s = recommend_opening("SS", _frame(), PS, 100_000.0)
     text = render_brief("2026-08-27", [w, s], [], [])
-    assert "| WW |" in text and "WAIT†" in text
+    assert "| WW |" in text and "**Reference only**" in text
     row = [ln for ln in text.splitlines() if ln.startswith("| WW |")][0]
     cells = [c.strip() for c in row.strip("|").split("|")]
-    strike, dte, delta, prem = cells[3:7]
+    # Ticker | Price | State | Decision | Reason | Strike | DTE | Δ | prem
+    strike, dte, delta, prem = cells[5:9]
     assert strike != "—" and dte != "—" and delta != "—" and prem != "—"
-    assert "† WAIT rows show the contract the selector would have chosen" in text
+    assert "the contract the selector would have chosen" in text
     assert "Candidates (momentum monitor)" not in text
     assert "momentum" not in text.lower()
 
@@ -223,8 +224,9 @@ def test_cumulative_week_cap_is_warning_not_block():
     # week 41: 60,500 + 91,500 = 152,000 > 150,000 -> warned; week 43 fine
     assert len(summary) == 1 and "RISK-5-CUM" in summary[0]
     assert set(per) == {"AAPL", "AMZN", "TSM"} and "BRK-B" not in per
-    assert "Room: $89,500" in summary[0]
-    assert "One subset that fits" in summary[0]
+    assert "remaining capacity $89,500" in summary[0]
+    assert "Expiration week of October 5–9, 2026" in summary[0]     # not ISO 2026-W41
+    assert "Capacity example — fits the limit, not a ranking" in summary[0]
     # nothing is downgraded — actions untouched
     assert all(r["action"] == "SELL_PUT" for r in recs)
 
@@ -256,7 +258,7 @@ def test_cumulative_review_renders_as_review_marker():
     r["state_names"] = ["BULL_LOW_VOL", "FAIR", "POOR"]
     r["review_warnings"] = ["RISK-5-CUM:week_cap_if_all_executed — ISO week 2026-W41: ..."]
     text = render_brief("2026-09-10", [r], [], ["REVIEW (cumulative): ISO week 2026-W41: ..."])
-    assert "SELL_PUT ⚠ REVIEW" in text and "RISK-5-CUM" in text
+    assert "**Candidate — review required**" in text and "RISK-5-CUM" in text
 
 
 def test_shared_review_warning_renders_once_with_all_tickers():
@@ -271,4 +273,6 @@ def test_shared_review_warning_renders_once_with_all_tickers():
     text = render_brief("2026-09-10", recs, [], [])
     assert text.count("shared text") == 1
     assert "**AAPL, AMZN, TSM** —" in text
-    assert text.count("SELL_PUT ⚠ REVIEW") == 3        # per-row marker kept
+    rows = [ln for ln in text.splitlines()
+            if ln.startswith("| ") and "**Candidate — review required**" in ln]
+    assert len(rows) == 3                                   # per-row status kept

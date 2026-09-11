@@ -7,6 +7,7 @@ Run:  python -m rlbot.assistant.daily [--download] [--cash 100000]
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 from pathlib import Path
 
@@ -100,11 +101,14 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 
 | Column | Meaning |
 |---|---|
-| Strike / DTE / Δ / Model prem | The recommended contract; on `WAIT†` rows, the contract the selector would have chosen (blocked or reference) |
+| Price | Last close used for every calculation in the row |
+| Decision / Reason | One status per row — Candidate; Candidate — review required; Blocked — position limit / MCB ceiling / layer A; Reference only; No contract — and the one reason behind it. Full machine reasons live in the JSON |
+| Strike / DTE / Δ / Model prem | The recommended contract; on Blocked and Reference-only rows, the contract the selector would have chosen |
 | Posture | mcb-wheel's per-ticker `delta_posture` (CONSERVATIVE / MODERATE / HIGHER); `(hard)` = the ceiling actually filtered this row |
 | **Ceiling** | **The MCB value** — mcb-wheel's `wheel_entry`: the highest net cost basis (strike − premium) you would still be comfortable acquiring the stock at; the put's net basis must sit at/below it when the gate is hard |
 | Prem req | `max(0, strike − Ceiling)`: the minimum live premium that makes the shown strike acceptable |
-| DD50 / DD75 | Reference: the ticker's typical (median) and strong (75th-percentile) historical corrections from a trailing high, per mcb-wheel. `drop_needed` (how far spot sits above the Ceiling) is judged against these — within DD50 → entry reachable in a typical correction; beyond DD90 → needs an extreme one |
+| Ref high (date) | mcb-wheel's trailing high (`ref_high`) the pullback percentiles are measured from, with the date our close series printed it |
+| Typical / Larger historical pullback | mcb-wheel's median (`dd50`) and 75th-percentile (`dd75`) corrections from the trailing high, translated into a resulting price and dollar decline: e.g. from a 200.00 high an 18% pullback is a 36.00 decline to 164.00, shown as `164.00 (−36.00, 18.0%)`. When the report carries no trailing high the percentage is applied to today's price and the cell is marked *illustrative*. Reference for judging `drop_needed` (how far spot sits above the Ceiling): within the typical pullback → entry reachable in an ordinary correction |
 | MCB flags | guardrail (CAUTION/SEVERE), reachability (PATIENCE/UNREACHABLE — informational), layer A (MONITOR_ONLY/HALT — never trade) |
 
 **Column definitions (covered calls).**
@@ -113,8 +117,8 @@ The Δ column is the selected contract's actual delta (≈ assignment probabilit
 |---|---|
 | CC posture | mcb-wheel's `cc_posture`: HIGHER (spot at/above the call-away level — assignment welcome), STANDARD (level reachable within typical 45-day upside), CONSERVATIVE (assignment undesirable here — tier capped) |
 | **CCA** | **Covered-Call Assignment level** — mcb-wheel's `selected_call_away_level`: the price at which being called away is acceptable, per your per-ticker `assignment_preference` (EXIT ≤ TRIM ≤ PROTECT), computed from upper-percentile valuation multiples, forward fundamental value and the FMP median target, floored at cost basis × (1 + minimum return). The call-side twin of the MCB ceiling |
-| Exit check | `strike + premium` vs CCA: `OK (+x)` = ASSIGNMENT_ACCEPTABLE; `INCOME_WAIT (−x)` = effective exit below the level by x — flagged ⚠ REVIEW, never auto-rejected |
-| Shares | Shares held per the positions tab (or inferred from open CCs); `none (ref)` rows are hypothetical |
+| Exit check | `strike + premium` vs CCA: `OK (+x)` = ASSIGNMENT_ACCEPTABLE; `INCOME_WAIT (−x)` = effective exit below the level by x — Candidate — review required, never auto-rejected |
+| Shares held / Committed / Additional contracts | Shares on the positions tab; shares already covering open CC contracts (100 × contracts in positions.csv); `(held − committed) ÷ 100` = contracts still coverable. Zero → Blocked — no uncovered shares |
 
 **MCB gates (mcb-wheel v2, 2026-09-09) — an aggressiveness pivot, not a uniform rejection boundary.** `wheel_entry` is the net cost basis (strike − premium) comfortable to acquire at. The producer publishes a `Posture` per ticker: **CONSERVATIVE** (far above entry, rising/sideways) — the ceiling is advisory only, since a conservative-delta put here is a low-probability income trade, not an acquisition attempt; **HIGHER** (at/near entry) — the ceiling is hard, always, since assignment is welcome and sought; **MODERATE** (entry reachable via a typical correction) — hard only for BALANCED-and-up tiers, advisory for income tiers (WAIT/DEFENSIVE/CONSERVATIVE), the one case the producer leaves to us. `(hard)` next to the posture in the table means the ceiling actually filtered this trade. **A confirmed downtrend overrides all of this to conservative-or-wait** — "don't catch a falling knife" — since the producer computes no trend signal; this repo supplies it. `Prem req` = the minimum live premium making the shown strike acceptable. Layer-A `MONITOR_ONLY`/`HALT` names are never traded. Reachability remains a separate, informational signal (`UNREACHABLE`/`PATIENCE`), unrelated to Posture. Open CSPs are flagged only when the ceiling was/would be hard for them; the call side is governed by cost-basis discipline (calls never sold below basis), since MCB is acquisition-side only. **The selector's assignment penalty is also MCB-fed** (`score_valuation` in the JSON): ATTRACTIVE when entry is within the ticker's typical correction (`drop_needed ≤ dd50`), EXPENSIVE when it needs a beyond-90th-percentile correction, one notch of relief when a severe correction is already underway outside a stressed market — this replaces the Google-Sheet FV anchor in the score only; the State column's valuation (the policy's input) is unchanged. A report older than 5 trading sessions is expired and disables all of this (warning shown).
 
@@ -143,6 +147,194 @@ def _correlated_exposures(ticker, book, closes, spots, nav, rcfg_risk):
                          "exposure_pct": book.potential_exposure(
                              other, spots.get(other)) / nav if nav > 0 else 0})
     return hits
+
+
+def week_label(year: int, week: int) -> str:
+    """ISO (year, week) -> the expiration week's Mon–Fri calendar dates,
+    e.g. 'October 5–9, 2026' or 'September 28–October 2, 2026'."""
+    mon = _dt.date.fromisocalendar(year, week, 1)
+    fri = _dt.date.fromisocalendar(year, week, 5)
+    if mon.month == fri.month:
+        return f"{mon:%B} {mon.day}–{fri.day}, {fri.year}"
+    return f"{mon:%B} {mon.day}–{fri:%B} {fri.day}, {fri.year}"
+
+
+def high_date(frame: pd.DataFrame, ref_high: float | None,
+              tol: float = 0.001, years: int = 6):
+    """Date on which the close series printed mcb-wheel's trailing high
+    (within tol); None when the frame does not contain it."""
+    if ref_high is None or frame is None or frame.empty or "close" not in frame:
+        return None
+    closes = frame["close"].tail(252 * years).dropna()
+    if closes.empty:
+        return None
+    gap = (closes - ref_high).abs()
+    i = gap.idxmin()                       # the close nearest the reported high
+    return str(i.date()) if gap[i] / ref_high <= tol else None
+
+
+def pullback_scenarios(ref_high, spot, dd50, dd75) -> dict | None:
+    """DD percentiles as dollar moves and resulting prices. Measured from the
+    trailing high when the producer supplied it; otherwise applied to spot
+    and labelled illustrative (the percentiles describe corrections from a
+    high, not from today's price)."""
+    base = ref_high if ref_high else spot
+    if not base:
+        return None
+    out = {"basis": "ref_high" if ref_high else "spot", "base": round(base, 2)}
+    for name, dd in (("typical", dd50), ("larger", dd75)):
+        out[name] = (None if dd is None else
+                     {"pct": dd, "drop": round(base * dd, 2),
+                      "price": round(base * (1 - dd), 2)})
+    return out
+
+
+def _short_warning(w: str) -> str:
+    code = w.split(":")[0]
+    return {"RISK-5-CUM": "week escrow cap if every candidate executes",
+            "RISK-8-CUM": "stress reserve if every candidate executes",
+            "RISK-7": "earnings inside the expiry window",
+            "RISK-9": "correlated with existing book exposure",
+            "CCA": "exit below the CCA level"}.get(code, code)
+
+
+def decision_status(rec: dict) -> dict:
+    """One status + one short reason per opening row (2026-09-11). The full
+    machine reason stays in `reason`; the review block carries full texts."""
+    a, reason = rec.get("action"), rec.get("reason") or ""
+    t = rec.get("ticker", "")
+    if a == "SELL_PUT":
+        ws = rec.get("review_warnings") or []
+        if not ws:
+            return {"status": "Candidate",
+                    "reason": "passes policy, MCB gate and risk engine"}
+        return {"status": "Candidate — review required",
+                "reason": "; ".join(dict.fromkeys(_short_warning(w) for w in ws))}
+    if a == "SKIP":
+        return {"status": "Skipped", "reason": reason}
+    if reason.startswith("risk engine"):
+        d = rec.get("risk_detail") or {}
+        parts = []
+        for f in d.get("flags", []):
+            code = f.split(":")[0]
+            if code == "RISK-3" and d.get("exposure_pct") is not None:
+                parts.append(f"concentration limit: exposure to {t} (shares + puts "
+                             f"incl. this one) would be {d['exposure_pct']:.1%} of NAV "
+                             f"vs the {d['exposure_cap_pct']:.0%} cap")
+            elif code == "RISK-5" and d.get("week_pct") is not None:
+                parts.append(f"expiration-week escrow would be {d['week_pct']:.1%} "
+                             f"of NAV vs the {d['week_cap_pct']:.0%} cap")
+            elif code == "RISK-8":
+                parts.append("assignment-stress reserve would fall below minimum")
+            elif code == "RISK-4":
+                parts.append("distinct-underlying count at cap")
+            elif code == "RISK-1":
+                parts.append("not cash-secured at this NAV")
+            else:
+                parts.append(f)
+        return {"status": "Blocked — position limit", "reason": "; ".join(parts) or reason}
+    if reason.startswith("every viable expiry"):
+        return {"status": "Blocked — position limit",
+                "reason": "every 25–45 DTE expiry falls in a week already at the escrow cap"}
+    if reason.startswith("MCB gate: layer A"):
+        return {"status": "Blocked — layer A", "reason": reason.split(": ", 1)[-1]}
+    if reason.startswith("MCB unreachable") or reason.startswith("MCB gate"):
+        v = rec.get("mcb") or {}
+        return {"status": "Blocked — MCB ceiling",
+                "reason": f"no delta-band strike nets below the ceiling "
+                          f"{v.get('ceiling', '?')} (posture {v.get('posture') or '?'}"
+                          f"{', downtrend override' if v.get('downtrend_override') else ''}"
+                          "); see opportunity scan"}
+    if reason.startswith("rule policy"):
+        return {"status": "Reference only",
+                "reason": "policy chose WAIT; contract shown is the CONSERVATIVE-tier reference"}
+    return {"status": "No contract", "reason": reason}
+
+
+def call_decision_status(rec: dict) -> dict:
+    """Covered-call twin of decision_status."""
+    a, reason = rec.get("action"), rec.get("reason") or ""
+    k = rec.get("cca") or {}
+    shares, committed = int(k.get("shares") or 0), int(k.get("committed_shares") or 0)
+    avail = k.get("available_contracts")
+    if a == "SKIP":
+        return {"status": "Skipped", "reason": reason}
+    if shares < 100:
+        return {"status": "Reference only", "reason": "no shares held — hypothetical"}
+    if avail == 0:
+        return {"status": "Blocked — no uncovered shares",
+                "reason": f"{shares:,} held, {committed:,} already committed to open calls"}
+    if a == "SELL_CALL":
+        if rec.get("review_warnings"):
+            return {"status": "Candidate — review required",
+                    "reason": f"exit {k.get('exit_value')} sits ${k.get('shortfall'):,.2f} "
+                              f"below the CCA level {k.get('level'):.2f}"}
+        tail = ("exit at/above CCA" if k.get("classification") == "ASSIGNMENT_ACCEPTABLE"
+                else "no CCA level (constraint absent)")
+        return {"status": "Candidate", "reason": f"{avail} contract(s) coverable; {tail}"}
+    if "cost basis" in reason:
+        spot, basis = rec.get("spot"), k.get("basis")
+        if spot is not None and basis is not None and spot < basis:
+            return {"status": "Blocked — cost basis",
+                    "reason": f"price {spot:.2f} below basis {basis:.2f}; "
+                              "no call at/above basis in the window"}
+        return {"status": "No contract",
+                "reason": f"no call strike at/above basis {basis:.2f} in the 25–45 DTE "
+                          "window (thin chain); price is above basis"}
+    if reason.startswith("stock policy"):
+        return {"status": "Wait — policy",
+                "reason": "stock rule: preserve upside; contract shown is the CONSERVATIVE reference"}
+    if reason.startswith("risk engine"):
+        return {"status": "Blocked — risk engine", "reason": reason}
+    return {"status": "No contract", "reason": reason}
+
+
+def capital_summary(book, nav: float, recs: list, stock_values: dict,
+                    rk, available_cash: float | None = None) -> dict:
+    """Total account value, cash reserved for puts, stock sleeve, cash
+    available for new trades (verified only when the user supplies the
+    broker figure), and per-expiration-week capacity with calendar dates."""
+    escrow = float(book.put_escrow) if book is not None else 0.0
+    stock = sum(v["value"] for v in stock_values.values())
+    proposed = [(r["ticker"], r["contract"]["strike"] * 100,
+                 pd.Timestamp(r["contract"]["expiration"]))
+                for r in recs if r.get("action") == "SELL_PUT" and r.get("contract")]
+    prop_total = sum(e for _, e, _ in proposed)
+    est = nav - escrow - stock
+    verified = available_cash is not None
+    avail = available_cash if verified else est
+    d = {"nav": nav, "nav_source": "assumed via --cash; not broker-verified",
+         "put_escrow": escrow,
+         "n_put_rows": len(book.put_positions) if book is not None else 0,
+         "stock_value": stock, "stock_detail": stock_values,
+         "available_cash": avail,
+         "available_verified": verified,
+         "available_source": ("verified — broker figure entered via --available-cash"
+                              if verified else
+                              "estimated = NAV − put escrow − stock sleeve; verify against broker"),
+         "inconsistent": (not verified) and est < 0,
+         "proposed_escrow": prop_total, "n_proposed": len(proposed),
+         "after_all_candidates": avail - prop_total,
+         "week_cap_pct": rk.max_week_assignment_pct, "weeks": []}
+    cap = rk.max_week_assignment_pct * nav
+    by_week: dict = {}
+    for t, e, exp in proposed:
+        iso = exp.isocalendar()
+        by_week.setdefault((iso.year, iso.week), []).append((t, e))
+    existing = dict(book.expiry_week_escrow) if book is not None else {}
+    for wk in sorted(set(existing) | set(by_week)):
+        ex = existing.get(wk, 0.0)
+        items = by_week.get(wk, [])
+        add = sum(e for _, e in items)
+        if ex <= 0 and add <= 0:
+            continue
+        total = ex + add
+        d["weeks"].append({"iso": f"{wk[0]}-W{wk[1]:02d}", "label": week_label(*wk),
+                           "existing": ex, "cap": cap, "remaining": max(0.0, cap - ex),
+                           "proposed": add, "proposed_tickers": [t for t, _ in items],
+                           "if_all": total, "if_all_pct": total / nav if nav else 0.0,
+                           "over_by": max(0.0, total - cap)})
+    return d
 
 
 def cumulative_review(recs: list, book, rk, nav: float) -> tuple:
@@ -179,12 +371,15 @@ def cumulative_review(recs: list, book, rk, nav: float) -> tuple:
             if used + e <= room + 1e-9:
                 fit.append(t); used += e
         names = ", ".join(f"{t} ${e:,.0f}" for t, e in items)
-        text = (f"RISK-5-CUM:week_cap_if_all_executed — ISO week {wk[0]}-W{wk[1]:02d}: "
-                f"existing ${existing:,.0f} + proposed ${added:,.0f} = ${total:,.0f} "
-                f"({total / nav:.1%} of NAV) exceeds the {rk.max_week_assignment_pct:.0%} "
-                f"cap (${cap:,.0f}). Each trade passes alone; together they do not. "
-                f"Room: ${room:,.0f}. Proposed: {names}. One subset that fits: "
-                f"{', '.join(fit) if fit else 'none'} (${used:,.0f}). Human decision.")
+        text = (f"RISK-5-CUM:week_cap_if_all_executed — Expiration week of "
+                f"{week_label(*wk)}: existing commitment ${existing:,.0f}; cap "
+                f"${cap:,.0f} ({rk.max_week_assignment_pct:.0%} of NAV); remaining "
+                f"capacity ${room:,.0f}. Proposed this brief: {names} (total "
+                f"${added:,.0f}) → ${total:,.0f} if all executed ({total / nav:.1%} "
+                f"of NAV), over the cap by ${total - cap:,.0f}. Each trade passes "
+                f"alone; together they do not. Capacity example — fits the limit, "
+                f"not a ranking: {', '.join(fit) if fit else 'none'} (${used:,.0f}). "
+                "Human decision.")
         summary.append(text)
         for t, _ in items:
             per.setdefault(t, []).append(text)
@@ -254,6 +449,10 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             "layer_a": mcb.layer_a,
             "reachability": mcb.reachability,
             "dd50": mcb.dd50, "dd75": mcb.dd75,      # correction context (ref.)
+            "ref_high": mcb.ref_high,
+            "ref_high_date": high_date(frame, mcb.ref_high),
+            "pullbacks": pullback_scenarios(mcb.ref_high, out["spot"],
+                                            mcb.dd50, mcb.dd75),
             "as_of": mcb.date,
         }
         ok, why = tradeable(mcb)
@@ -314,6 +513,14 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             "source": "estimated (last AV reportedDate + ~91d, ±5d window)",
             "expiration": str(quote.expiration.date()),
         }
+        exposure_before = book.potential_exposure(ticker, spots.get(ticker, out["spot"]))
+        week_before = book.same_week_escrow(quote.expiration)
+        notional = quote.strike * 100
+        out["risk_detail"] = {                     # feeds decision_status()
+            "exposure_pct": (exposure_before + notional) / cash if cash else None,
+            "exposure_cap_pct": rk.max_pct_per_underlying,
+            "week_pct": (week_before + notional) / cash if cash else None,
+            "week_cap_pct": rk.max_week_assignment_pct}
         risk = validate_open(
             quote, 1, cash, 0, cash,
             open_put_escrow=book.put_escrow,
@@ -321,9 +528,8 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
             cfg=rk,                                # portfolio-mode caps
             n_underlyings=book.n_underlyings,
             is_new_underlying=not book.has(ticker),
-            underlying_exposure=book.potential_exposure(
-                ticker, spots.get(ticker, out["spot"])),
-            same_week_escrow=book.same_week_escrow(quote.expiration),
+            underlying_exposure=exposure_before,
+            same_week_escrow=week_before,
             stressed_assignment=book.stressed_assignment(
                 spots, extra_put={"ticker": ticker, "strike": quote.strike,
                                   "expiration": quote.expiration,
@@ -408,9 +614,11 @@ def recommend_opening(ticker: str, frame: pd.DataFrame, ps, cash: float,
     if not risk.passed:
         out["action"] = "WAIT"
         out["reason"] = f"risk engine: {risk.flags}"
+        out.setdefault("risk_detail", {})["flags"] = list(risk.flags)
         out["candidate_contract"] = _contract_dict(quote, ps, n_cands,
                                                    basis="blocked_by_risk_engine")
         return out
+    out.pop("risk_detail", None)
     out["action"] = "SELL_PUT"
     if risk.warnings:      # SPEC-004 §2.8: human-review, never blocking
         out["review_warnings"] = list(risk.warnings)
@@ -429,8 +637,10 @@ CC_NOTE = ("Covered calls for every universe name, gated by mcb-wheel's "
            "ASSIGNMENT_ACCEPTABLE; below -> INCOME_WAIT with the shortfall "
            "(⚠ REVIEW). CC posture caps the tier (CONSERVATIVE -> "
            "CALL_CONSERVATIVE at most; a Bull Trend on top -> DEFENSIVE, "
-           "protect upside). Rows with no shares held are reference only — "
-           "a covered call needs 100 shares per contract.")
+           "protect upside). Holdings are split from a hypothetical watchlist: "
+           "shares held come from the positions tab, shares committed from open "
+           "CC contracts in positions.csv, and only the uncovered remainder "
+           "(in 100-share lots) counts as coverable.")
 
 
 def recommend_call(ticker: str, frame: pd.DataFrame, ps, cash: float,
@@ -453,16 +663,20 @@ def recommend_call(ticker: str, frame: pd.DataFrame, ps, cash: float,
     out["state_names"] = [REGIME_NAMES[q[0]], VAL_NAMES[q[1]], VC_NAMES[q[2]]]
     shares = 0
     basis = None
+    committed = int(book.cc_shares.get(ticker, 0)) if book is not None else 0
     if mcb is not None and mcb.position_shares:
         shares, basis = int(mcb.position_shares), mcb.position_basis
-    elif book is not None:
-        shares = int(book.cc_shares.get(ticker, 0))
+    else:
+        shares = committed          # only what open CCs imply -> none free
+    available = max(0, (shares - committed) // 100) if shares >= 100 else 0
     out["cca"] = {"level": mcb.cca if mcb else None,
                   "mode": mcb.cca_mode if mcb else None,
                   "cc_posture": mcb.cc_posture if mcb else None,
                   "rise_needed": mcb.rise_needed if mcb else None,
                   "up50": mcb.up50 if mcb else None, "up75": mcb.up75 if mcb else None,
                   "shares": shares, "basis": basis,
+                  "committed_shares": committed,       # 100 x open CC contracts
+                  "available_contracts": available,
                   "reference_only": shares < 100}
     action = policy.decide(PositionState.LONG_STOCK, q, row)
     out["policy_action"] = action.name
@@ -644,44 +858,147 @@ def _mcb_flags(v: dict) -> str:
     return ", ".join(bits) if bits else ("—" if not v else "ok")
 
 
+def _pullback_cell(p: dict | None, key: str) -> str:
+    if not p or not p.get(key):
+        return "—"
+    x = p[key]
+    cell = f"{x['price']:.2f} (−{x['drop']:.2f}, {x['pct']:.1%})"
+    return cell if p["basis"] == "ref_high" else cell + " ~illustrative from today's price"
+
+
+def _ref_high_cell(v: dict) -> str:
+    if v.get("ref_high") is None:
+        return "—"
+    return f"{v['ref_high']:.2f} ({v.get('ref_high_date') or 'date n/a'})"
+
+
+def _fmt_price(x) -> str:
+    return "—" if x is None else f"{x:,.2f}"
+
+
+def _render_capital(cap: dict) -> list:
+    lines = ["", "## Capital and limits", "",
+             "| Item | Amount | Basis |", "|---|---|---|",
+             f"| Total account value (NAV) | ${cap['nav']:,.0f} | {cap['nav_source']} |",
+             f"| Cash reserved for open puts (escrow) | ${cap['put_escrow']:,.0f} "
+             f"| {cap['n_put_rows']} open put rows; strike × 100 × contracts |"]
+    sd = cap.get("stock_detail") or {}
+    detail = (", ".join(f"{t} {d['shares']:,} × {d['spot']:,.2f}" for t, d in sd.items())
+              or "none on the positions tab")
+    lines.append(f"| Stock sleeve (shares × last close) | ${cap['stock_value']:,.0f} | {detail} |")
+    tag = "Verified" if cap.get("available_verified") else "Estimated"
+    lines.append(f"| {tag} cash available for new trades | ${cap['available_cash']:,.0f} "
+                 f"| {cap['available_source']} |")
+    if cap.get("inconsistent"):
+        lines.append("| ⚠ Inconsistent inputs | — | put escrow + stock sleeve exceed the "
+                     "assumed NAV: either the account is larger than `--cash`, or the "
+                     "open puts are not fully cash-secured (margin). Every ratio above "
+                     "and below inherits this. Pass `--cash` and `--available-cash` "
+                     "from the broker before acting |")
+    lines.append(f"| New put escrow proposed in this brief | ${cap['proposed_escrow']:,.0f} "
+                 f"| {cap['n_proposed']} candidate row(s) |")
+    lines.append(f"| Remaining if every candidate executes | ${cap['after_all_candidates']:,.0f} "
+                 f"| {tag.lower()} available − proposed |")
+    if cap.get("weeks"):
+        pct = cap["week_cap_pct"]
+        lines += ["", f"### Expiration-week capacity (cap {pct:.0%} of NAV = "
+                      f"${pct * cap['nav']:,.0f} per expiration week)", "",
+                  "| Expiration week | Existing commitment | Remaining capacity "
+                  "| Proposed this brief | If all executed | Status |",
+                  "|---|---|---|---|---|---|"]
+        for w in cap["weeks"]:
+            prop = (f"${w['proposed']:,.0f} ({', '.join(w['proposed_tickers'])})"
+                    if w["proposed"] else "—")
+            status = (f"⚠ over the cap by ${w['over_by']:,.0f}" if w["over_by"] > 0
+                      else "within cap")
+            lines.append(f"| {w['label']} | ${w['existing']:,.0f} | ${w['remaining']:,.0f} "
+                         f"| {prop} | ${w['if_all']:,.0f} ({w['if_all_pct']:.1%}) | {status} |")
+        lines += ["", "_Existing commitment = put escrow already open in that week. "
+                      "Remaining capacity = cap − existing. A subset that fits the cap "
+                      "is a capacity example, not a ranking of the trades._"]
+    return lines
+
+
+def _review_block(rows: list, title: str) -> list:
+    """Identical warning texts (the cumulative notices are shared by every
+    affected row) render once, naming all tickers; per-ticker ones as-is."""
+    grouped: dict = {}
+    for r in rows:
+        for w in r.get("review_warnings", []):
+            grouped.setdefault(w, []).append(r["ticker"])
+    if not grouped:
+        return []
+    lines = ["", title, ""]
+    for w, tkrs in grouped.items():
+        lines.append(f"> **{', '.join(tkrs)}** — {w}")
+        lines.append(">")
+    lines.pop()
+    return lines
+
+
+def _call_row(r: dict, holdings: bool) -> str:
+    state = "/".join(r.get("state_names", ["—"]))
+    c = r.get("contract") or r.get("candidate_contract") or {}
+    k = r.get("cca") or {}
+    d = r.get("decision") or call_decision_status(r)
+    name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
+    cls = k.get("classification")
+    check = ("—" if cls is None else
+             f"OK (+{k['exit_value'] - k['level']:.2f})" if cls == "ASSIGNMENT_ACCEPTABLE"
+             else f"INCOME_WAIT (−{k['shortfall']:.2f})")
+    level = "—" if k.get("level") is None else f"{k['level']:.2f} ({k.get('mode') or '?'})"
+    row = (f"| {name} | {_fmt_price(r.get('spot'))} | {state} | **{d['status']}** | {d['reason']} "
+           f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
+           f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
+           f"| {k.get('cc_posture') or '—'} | {level} | {check} |")
+    if holdings:
+        row += (f" {k.get('shares', 0):,} | {k.get('committed_shares', 0):,} "
+                f"| {k.get('available_contracts', 0)} |")
+    return row
+
+
 def render_brief(date: str, recs: list, guides: list, warnings: list,
-                 call_recs: list | None = None) -> str:
+                 call_recs: list | None = None, capital: dict | None = None) -> str:
     lines = [f"# Wheel Daily Brief — {date}", "",
              f"_{MODEL_NOTE}_", ""]
     for w in warnings:
         lines.append(f"> ⚠️ {w}")
+    if capital:
+        lines += _render_capital(capital)
     lines += ["", "## Opening recommendations (cash sleeve)", "",
               f"_{VAL_GATE_NOTE}_", "",
-              "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
-              "| Posture | Ceiling | Prem req | DD50 | DD75 | MCB flags |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    any_ref = False
+              "| Ticker | Price | State | Decision | Reason | Strike | DTE | Δ | Model prem "
+              "| Posture | Ceiling | Prem req | Ref high (date) | Typical historical pullback "
+              "| Larger historical pullback | MCB flags |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in recs:
         state = "/".join(r.get("state_names", ["—"]))
         # Contract columns always populated (2026-09-11): the recommendation
-        # for SELL_PUT rows, the would-be/blocked/reference contract for WAIT.
+        # for candidates, the would-be/blocked/reference contract otherwise.
         c = r.get("contract") or r.get("candidate_contract") or {}
         v = r.get("mcb") or {}
+        d = r.get("decision") or decision_status(r)
         name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
-        dagger = "†" if (r["action"] == "WAIT" and r.get("candidate_contract")) else ""
-        any_ref = any_ref or bool(dagger)
-        action = r["action"] + dagger + (" ⚠ REVIEW" if r.get("review_warnings") else "")
         posture = v.get("posture", "—")
         if v.get("hard"):
             posture += " (hard)"
-        lines.append(f"| {name} | {state} | {action} "
+        lines.append(f"| {name} | {_fmt_price(r.get('spot'))} | {state} | **{d['status']}** "
+                     f"| {d['reason']} "
                      f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
                      f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
                      f"| {posture} | {v.get('ceiling', '—')} "
                      f"| {v.get('premium_required', '—')} "
-                     f"| {_pct(v.get('dd50'))} | {_pct(v.get('dd75'))} "
+                     f"| {_ref_high_cell(v)} | {_pullback_cell(v.get('pullbacks'), 'typical')} "
+                     f"| {_pullback_cell(v.get('pullbacks'), 'larger')} "
                      f"| {_mcb_flags(v)} |")
-    if any_ref:
-        lines += ["", "_† WAIT rows show the contract the selector would have "
-                      "chosen — the risk-engine- or MCB-blocked candidate, or the "
-                      "CONSERVATIVE-tier reference when the policy itself chose "
-                      "WAIT (`candidate_contract` in the JSON). Information, not "
-                      "a recommendation._"]
+    lines += ["", "_Decision is the one status that matters per row: **Candidate** "
+                  "(clear to trade), **Candidate — review required** (trade only after "
+                  "reading its review item below), **Blocked — …** (the named limit "
+                  "stops it today), **Reference only** (the policy chose WAIT; the "
+                  "contract shown is what a CONSERVATIVE put would pay). On Blocked and "
+                  "Reference rows the Strike/DTE/Δ/prem columns show the contract the "
+                  "selector would have chosen (`candidate_contract` in the JSON) — "
+                  "information, not a recommendation._"]
     # SPEC-011 §6.4: the scan's outcome must be visible in the brief, with
     # 'geometrically unreachable' and 'economically unattractive' distinct.
     opps = [(r["ticker"], r["reason"],
@@ -693,62 +1010,37 @@ def render_brief(date: str, recs: list, guides: list, warnings: list,
         for tkr, reason, opp in opps:
             mark = "⚠ " if opp is not None and not opp.get("low_yield") else ""
             lines.append(f"- {mark}**{tkr}**: {reason}")
-    # Group identical warning texts (the cumulative RISK-5-CUM/RISK-8-CUM
-    # notices are shared by every affected row) so each renders once, naming
-    # all the tickers it covers; per-ticker warnings (RISK-7/9) stay as-is.
-    grouped: dict = {}
-    for r in recs:
-        for w in r.get("review_warnings", []):
-            grouped.setdefault(w, []).append(r["ticker"])
-    if grouped:
-        lines += ["", "### ⚠ Human-review warnings (SPEC-004 §2.8 — "
-                      "approve or reject before trading)", ""]
-        for w, tkrs in grouped.items():
-            lines.append(f"> **{', '.join(tkrs)}** — {w}")
-            lines.append(">")
-        lines.pop()
+    lines += _review_block(recs, "### ⚠ Review items for candidates marked "
+                                 "'review required' (SPEC-004 §2.8 — approve or "
+                                 "reject before trading)")
     if any(r.get("leveraged") for r in recs):
         lines += ["", f"_{LEVERAGED_NOTE}_"]
     if call_recs:
+        live = [r for r in call_recs if r.get("action") != "SKIP"]
+        held = [r for r in live if (r.get("cca") or {}).get("shares", 0) >= 100]
+        watch = [r for r in live if r not in held]
         lines += ["", "## Covered-call recommendations (stock sleeve)", "",
                   f"_{CC_NOTE}_", "",
-                  "| Ticker | State | Action | Strike | DTE | Δ | Model prem "
-                  "| CC posture | CCA | Exit check | Shares |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|"]
-        any_ref = False
-        for r in call_recs:
-            if r.get("action") == "SKIP":
-                continue
-            state = "/".join(r.get("state_names", ["—"]))
-            c = r.get("contract") or r.get("candidate_contract") or {}
-            k = r.get("cca") or {}
-            name = f"{r['ticker']} (3x)" if r.get("leveraged") else r["ticker"]
-            dagger = "†" if (r["action"] == "WAIT" and r.get("candidate_contract")) else ""
-            any_ref = any_ref or bool(dagger)
-            action = r["action"] + dagger + (" ⚠ REVIEW" if r.get("review_warnings") else "")
-            cls = k.get("classification")
-            check = ("—" if cls is None else
-                     f"OK (+{k['exit_value'] - k['level']:.2f})" if cls == "ASSIGNMENT_ACCEPTABLE"
-                     else f"INCOME_WAIT (−{k['shortfall']:.2f})")
-            level = "—" if k.get("level") is None else f"{k['level']:.2f} ({k.get('mode') or '?'})"
-            shares = f"{k.get('shares', 0):,}" if k.get("shares") else "none (ref)"
-            lines.append(f"| {name} | {state} | {action} "
-                         f"| {c.get('strike', '—')} | {c.get('dte', '—')} "
-                         f"| {c.get('delta', '—')} | {c.get('model_premium', '—')} "
-                         f"| {k.get('cc_posture') or '—'} | {level} | {check} | {shares} |")
-        lines += ["", "_Rows marked `none (ref)` hold no shares — shown for reference; "
-                      "a covered call requires 100 shares per contract. † as above._"]
-        cc_reviews: dict = {}
-        for r in call_recs:
-            for w in r.get("review_warnings", []):
-                cc_reviews.setdefault(w, []).append(r["ticker"])
-        if cc_reviews:
-            lines += ["", "### ⚠ Covered-call review (CCA INCOME_WAIT — assignment "
-                          "not desired at this price)", ""]
-            for w, tkrs in cc_reviews.items():
-                lines.append(f"> **{', '.join(tkrs)}** — {w}")
-                lines.append(">")
-            lines.pop()
+                  "### Holdings — shares available to cover", ""]
+        if held:
+            lines += ["| Ticker | Price | State | Decision | Reason | Strike | DTE | Δ "
+                      "| Model prem | CC posture | CCA | Exit check | Shares held "
+                      "| Committed to open calls | Additional contracts coverable |",
+                      "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            lines += [_call_row(r, holdings=True) for r in held]
+        else:
+            lines.append("_No holdings with ≥100 shares on the positions tab._")
+        if watch:
+            lines += ["", "### Hypothetical watchlist — no shares held", "",
+                      "_Reference only: a covered call needs 100 shares per contract; "
+                      "these rows show what the stock-side rule would sell if the put "
+                      "were assigned today._", "",
+                      "| Ticker | Price | State | Decision | Reason | Strike | DTE | Δ "
+                      "| Model prem | CC posture | CCA | Exit check |",
+                      "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            lines += [_call_row(r, holdings=False) for r in watch]
+        lines += _review_block(held, "### ⚠ Covered-call review items (CCA INCOME_WAIT — "
+                                     "assignment not desired at this price)")
 
     lines += ["", "## Open positions", "", f"_{MGMT_NOTE}_", ""]
     if guides:
@@ -822,6 +1114,10 @@ def main(argv=None):
                              "below which a below-band candidate carries a "
                              "LOW YIELD flag (decision support, never a "
                              "blocker; default 0.07)")
+    parser.add_argument("--available-cash", type=float, default=None,
+                        help="broker-verified cash available for new trades; "
+                             "when given, the brief labels it verified instead "
+                             "of estimating NAV − put escrow − stock sleeve")
     parser.add_argument("--positions", type=Path, default=None)
     parser.add_argument("--no-sync-positions", action="store_true",
                         help="skip the Google-Sheet monitor-tab sync")
@@ -1014,6 +1310,20 @@ def main(argv=None):
             r.setdefault("review_warnings", []).extend(cum_per[r["ticker"]])
     for line in cum_summary:
         warnings.append("REVIEW (cumulative): " + line.split(" — ", 1)[1])
+    for r in recs:
+        r["decision"] = decision_status(r)
+    for r in call_recs:
+        r["decision"] = call_decision_status(r)
+    # Capital and limits (2026-09-11): stock sleeve from the MCB positions
+    # tab marked at the last close; cash available is estimated unless the
+    # broker figure is passed via --available-cash.
+    stock_values = {}
+    for t, m in mcb_rows.items():
+        if m.position_shares and t in book_spots:
+            stock_values[t] = {"shares": int(m.position_shares), "spot": book_spots[t],
+                               "value": int(m.position_shares) * book_spots[t]}
+    capital = capital_summary(book, args.cash, recs, stock_values, risk_cfg,
+                              available_cash=args.available_cash)
 
     if (pd.Timestamp.now().normalize() - latest).days > STALE_TRADING_DAYS + 2:
         warnings.append(f"latest bar is {latest.date()} — data is stale; "
@@ -1034,10 +1344,11 @@ def main(argv=None):
     live.mkdir(parents=True, exist_ok=True)
     payload = {"date": date, "iv_uplift": gate["iv_uplift"],
                "openings": recs, "covered_calls": call_recs,
+               "capital": capital,
                "positions": guides, "warnings": warnings,
                "notes": [MODEL_NOTE, MGMT_NOTE, LEVERAGED_NOTE]}
     (live / f"recommendations_{date}.json").write_text(json.dumps(payload, indent=2))
-    brief = render_brief(date, recs, guides, warnings, call_recs)
+    brief = render_brief(date, recs, guides, warnings, call_recs, capital)
     (live / f"brief_{date}.md").write_text(brief)
 
     run_id = f"live-{date}"

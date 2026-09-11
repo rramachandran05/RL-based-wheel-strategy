@@ -46,6 +46,7 @@ class McbRow:
     shadow_min_tier: str | None = None     # old guardrail tier, calibration only
     # correction-history percentiles (drawdown from trailing high) — feed the
     # score-side valuation state (SPEC-011 §2 rule 6) with dd_now/drop_needed
+    ref_high: float | None = None         # trailing high the dd* percentiles are measured from
     dd50: float | None = None
     dd75: float | None = None
     dd90: float | None = None
@@ -135,6 +136,7 @@ def load_mcb(cfg: RlbotConfig | None = None, as_of=None) -> tuple:
             drop_needed=float(getattr(r, "drop_needed", None)) if pd.notna(getattr(r, "drop_needed", None)) else None,
             action=str(getattr(r, "action", None)) if pd.notna(getattr(r, "action", None)) else None,
             shadow_min_tier=str(shadow_tier) if pd.notna(shadow_tier) and str(shadow_tier) in TIERS else None,
+            ref_high=_f(getattr(r, "ref_high", None)),
             dd50=_f(getattr(r, "dd50", None)),
             dd75=_f(getattr(r, "dd75", None)),
             dd90=_f(getattr(r, "dd90", None)),
